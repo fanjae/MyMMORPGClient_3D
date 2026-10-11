@@ -35,6 +35,8 @@ public sealed class NetworkManager3D : MonoBehaviour
     public event Action<WhisperData> WhisperReceived;
     public event Action<ChatResponseData> ChatRejected;
     public event Action<MonsterEnterData> MonsterEntered;
+    public event Action<InventoryData> InventoryReceived;
+    public event Action<FieldMonstersData> FieldMonstersReceived;
     public event Action<ChangeMapData> MapChanged;
     public event Action LoginDisconnected;
     public event Action GameDisconnected;
@@ -123,6 +125,12 @@ public sealed class NetworkManager3D : MonoBehaviour
     public Task SendMovementActionsAsync(Motion3DBatch batch)
     {
         return _gameSession.SendAsync((ushort)GamePacketOpcode.MovementActions3D, Movement3DProtocol.CreateBatch(batch));
+    }
+
+    // 현재 화면의 변경 번호를 함께 보내 서버가 오래된 슬롯 조작을 거절할 수 있도록 한다.
+    public Task SendInventoryAsync(InventoryOperation operation, byte category, byte source, byte target, ulong revision)
+    {
+        return _gameSession.SendAsync((ushort)GamePacketOpcode.InventoryRequest, FieldProtocol.InventoryRequest(operation, category, source, target, revision));
     }
 
     public Task SendChatAsync(string message)
@@ -232,6 +240,13 @@ public sealed class NetworkManager3D : MonoBehaviour
 
                 case GamePacketOpcode.MonsterEnterMap:
                     MonsterEntered?.Invoke(GameProtocol.ReadMonsterEnterMap(payload));
+                    break;
+                // 큐에서 실행되므로 인벤토리 UI와 몬스터 표시도 Unity 메인 스레드에서 갱신한다.
+                case GamePacketOpcode.InventorySnapshot:
+                    InventoryReceived?.Invoke(FieldProtocol.ReadInventory(payload));
+                    break;
+                case GamePacketOpcode.FieldMonsters3D:
+                    FieldMonstersReceived?.Invoke(FieldProtocol.ReadMonsters(payload));
                     break;
             }
         });

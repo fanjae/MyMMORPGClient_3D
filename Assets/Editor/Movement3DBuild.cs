@@ -8,6 +8,8 @@ public static class Movement3DBuild
     [MenuItem("Tools/MyMMORPG/Build 3D Windows Client")]
     public static void Build()
     {
+        // 인벤토리와 입력 기록기가 저장된 씬을 기준으로 실행 파일을 빌드한다.
+        FieldSceneSetup.Ensure();
         const string materialPath = "Assets/Resources/Movement3DMaterial.mat";
         if (AssetDatabase.LoadAssetAtPath<UnityEngine.Material>(materialPath) == null)
         {

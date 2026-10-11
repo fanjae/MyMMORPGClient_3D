@@ -10,6 +10,20 @@ using UnityEngine.Rendering;
 public sealed class Client3DController : MonoBehaviour
 {
     private NetworkManager3D _network;
+    private InventoryWindow _inventory;
+    private InputProbe3D _inputProbe;
+    private readonly Dictionary<uint, Monster3DView> _monsters = new();
+    private ulong _monsterTick;
+    private bool _hasMonsterTick;
+    private int _monsterUpdates;
+    private double _firstMonsterX;
+    private bool _monsterMoved;
+    // 화면 갱신 사이의 짧은 입력도 다음 고정 이동 단계까지 보존한다.
+    private int _tapX, _tapZ;
+    private readonly HashSet<KeyCode> _windowKeys = new();
+    private readonly HashSet<KeyCode> _windowButtons = new();
+    private bool _windowJump, _windowInventory, _windowEscape;
+    private int _windowTapX, _windowTapZ;
     private readonly ClientMotion3D _motion = new();
     private readonly Dictionary<uint, Player3DView> _players = new();
     private readonly List<GameObject> _terrain = new();
@@ -43,6 +57,11 @@ public sealed class Client3DController : MonoBehaviour
     {
         Application.runInBackground = true; Application.targetFrameRate = 60;
         _network = GetComponent<NetworkManager3D>();
+        _inventory = FindFirstObjectByType<InventoryWindow>();
+        _inputProbe = GetComponent<InputProbe3D>();
+        if (_inventory != null) _inventory.Requested += InventoryRequested;
+        _network.InventoryReceived += data => { if (_inventory != null) _inventory.Apply(data); };
+        _network.FieldMonstersReceived += MonstersReceived;
         _sceneWorld = FindFirstObjectByType<SceneWorld3D>();
         if (_sceneWorld != null) _sceneWorld.SetVisible(false);
         _network.LoginCompleted += LoginCompleted;
@@ -71,7 +90,7 @@ public sealed class Client3DController : MonoBehaviour
         _smokeFull = Array.Exists(arguments, arg => arg == "--smoke-full");
         _smoke = _smokeFull || Array.Exists(arguments, arg => arg == "--smoke-test" || arg == "--smoke-network");
         _smokeOnline = _smokeFull || Array.Exists(arguments, arg => arg == "--smoke-network");
-        if (_smokeFull)
+        if (_smokeFull || Array.Exists(arguments, arg => arg == "--manual-full"))
         {
             // 전체 연결 검증 계정은 실행 인자가 아닌 해당 테스트 프로세스의 환경 변수로 전달한다.
             _login = Environment.GetEnvironmentVariable("MMORPG_TEST_LOGIN");
@@ -100,9 +119,21 @@ public sealed class Client3DController : MonoBehaviour
         if (_busy && Time.unscaledTimeAsDouble >= _deadline)
         { ++_attempt; _network.DisconnectAll(); _busy = false; _changingMap = false; _characters = Array.Empty<CharacterInfo>(); _status = "Server response timed out."; }
         if (!_motion.Ready || _local == null || _failed) return;
+        // 오프라인 미리보기에서만 순찰을 직접 계산하고 온라인은 서버 상태를 사용한다.
+        if (_offline)
+            foreach (var monster in _monsters.Values)
+            {
+                var state = monster.State; state.X = -160 + (state.Id - 1) * 25 + Math.Sin((Time.unscaledTimeAsDouble - _smokeStarted) * 0.55 + state.Id) * 35;
+                state.Yaw = (ushort)(Math.Cos((Time.unscaledTimeAsDouble - _smokeStarted) * 0.55 + state.Id) > 0 ? 9000 : 27000); monster.Apply(state);
+            }
         Keyboard k = Keyboard.current;
-        if (k != null && k.escapeKey.wasPressedThisFrame) GUI.FocusControl(null);
-        bool allowed = Application.isFocused && GUIUtility.keyboardControl == 0 && !_changingMap && k != null;
+        if (_windowEscape || (k != null && k.escapeKey.wasPressedThisFrame)) { _windowEscape = false; GUI.FocusControl(null); if (_inventory != null) _inventory.SetVisible(false); }
+        if ((_windowInventory || (k != null && k.iKey.wasPressedThisFrame)) && GUIUtility.keyboardControl == 0 && _inventory != null)
+        { _inventory.SetVisible(!_inventory.IsOpen); if (_inventory.IsOpen && !_offline && _inventory.Data != null) InventoryRequested(InventoryOperation.Refresh, 0, 0, 0); }
+        _windowInventory = false;
+        // 채팅·인벤토리·Map 변경·창 비활성화 중에는 캐릭터 조작을 멈춘다.
+        bool allowed = Application.isFocused && GUIUtility.keyboardControl == 0 && !_changingMap && k != null && (_inventory == null || !_inventory.IsOpen);
+        if (_inputProbe != null) _inputProbe.Observe(k, allowed, _inventory != null && _inventory.IsOpen, _usingSceneTerrain, _motion);
         if (_smoke)
         {
             if (_smokeOnline && !_smokePeerReady)
@@ -112,19 +143,27 @@ public sealed class Client3DController : MonoBehaviour
             }
             double age = _motion.Tick * Motion3DSimulation.FixedDelta;
             _motion.SetInput(age < 0.7 ? -1 : 0, age < 0.7 ? 1 : 0, _motion.Tick == 0);
-            if (age > 3 && !_smokeFinishing) { _smokeFinishing = true; StartCoroutine(FinishSmoke()); }
+            if (age > (_smokeFull ? 5 : 3) && !_smokeFinishing) { _smokeFinishing = true; StartCoroutine(FinishSmoke()); }
         }
         else if (allowed)
         {
-            int x = ((k.dKey.isPressed || k.rightArrowKey.isPressed) ? 1 : 0) - ((k.aKey.isPressed || k.leftArrowKey.isPressed) ? 1 : 0);
-            int z = ((k.wKey.isPressed || k.upArrowKey.isPressed) ? 1 : 0) - ((k.sKey.isPressed || k.downArrowKey.isPressed) ? 1 : 0);
-            _motion.SetInput(x, z, k.spaceKey.wasPressedThisFrame);
+            int x = ((k.dKey.isPressed || k.rightArrowKey.isPressed || _windowKeys.Contains(KeyCode.D) || _windowKeys.Contains(KeyCode.RightArrow)) ? 1 : 0) - ((k.aKey.isPressed || k.leftArrowKey.isPressed || _windowKeys.Contains(KeyCode.A) || _windowKeys.Contains(KeyCode.LeftArrow)) ? 1 : 0);
+            int z = ((k.wKey.isPressed || k.upArrowKey.isPressed || _windowKeys.Contains(KeyCode.W) || _windowKeys.Contains(KeyCode.UpArrow)) ? 1 : 0) - ((k.sKey.isPressed || k.downArrowKey.isPressed || _windowKeys.Contains(KeyCode.S) || _windowKeys.Contains(KeyCode.DownArrow)) ? 1 : 0);
+            // 한 프레임 안에 눌렀다 뗀 입력도 최소 한 번의 고정 이동 단계에 반영한다.
+            int tapX = ((k.dKey.wasPressedThisFrame || k.rightArrowKey.wasPressedThisFrame) ? 1 : 0) - ((k.aKey.wasPressedThisFrame || k.leftArrowKey.wasPressedThisFrame) ? 1 : 0);
+            int tapZ = ((k.wKey.wasPressedThisFrame || k.upArrowKey.wasPressedThisFrame) ? 1 : 0) - ((k.sKey.wasPressedThisFrame || k.downArrowKey.wasPressedThisFrame) ? 1 : 0);
+            if (tapX != 0) _tapX = tapX; else if (_windowTapX != 0) _tapX = _windowTapX;
+            if (tapZ != 0) _tapZ = tapZ; else if (_windowTapZ != 0) _tapZ = _windowTapZ;
+            _windowTapX = _windowTapZ = 0;
+            if (x == 0) x = _tapX; if (z == 0) z = _tapZ;
+            _motion.SetInput(x, z, k.spaceKey.wasPressedThisFrame || _windowJump); _windowJump = false;
             if (_offline && k.rKey.wasPressedThisFrame) _motion.Configure(_world);
         }
-        else _motion.StopInput();
+        else { ClearWindowInput(); _motion.StopInput(); }
         try
         {
-            _motion.Advance(Time.unscaledDeltaTime);
+            ulong beforeTick = _motion.Tick; _motion.Advance(Time.unscaledDeltaTime);
+            if (_motion.Tick != beforeTick) _tapX = _tapZ = 0;
             if (!_sending && _motion.TryCreateBatch(Time.unscaledTimeAsDouble, out var batch))
             { if (!_offline) SendMovement(batch, _world); }
             _local.SetLocal(_motion.State);
@@ -145,12 +184,51 @@ public sealed class Client3DController : MonoBehaviour
         catch (Exception e) { if (ReferenceEquals(_world, world)) { _failed = true; _status = e.Message; } }
         finally { if (ReferenceEquals(_world, world)) _sending = false; }
     }
-    private void OnApplicationFocus(bool focused) { if (!focused) _motion.StopInput(); }
+    // 포커스를 잃으면 눌린 키와 대기 입력을 비워 복귀 후 이동·점프가 남지 않도록 한다.
+    private void OnApplicationFocus(bool focused) { if (!focused) { ClearWindowInput(); _windowButtons.Clear(); _motion.StopInput(); } }
+    private void ClearWindowInput() { _windowKeys.Clear(); _tapX = _tapZ = _windowTapX = _windowTapZ = 0; _windowJump = _windowInventory = _windowEscape = false; }
+    private void ReadWindowKeyEvent(Event input)
+    {
+        // InputSystem에 상태가 잡히지 않는 키보드 입력은 실제 창 이벤트로 보완한다.
+        // 일반 키보드 경로와 함께 사용하되 고정 이동 단계가 실행될 때까지 입력을 보존한다.
+        if (_smoke || !Application.isFocused || !_motion.Ready) return;
+        if (input.type == EventType.KeyUp) { _windowKeys.Remove(input.keyCode); _windowButtons.Remove(input.keyCode); return; }
+        if (input.type != EventType.KeyDown || GUIUtility.keyboardControl != 0) return;
+        Keyboard keyboard = Keyboard.current;
+        KeyCode key = input.keyCode;
+        // 키 코드 없이 문자만 전달된 창 이벤트도 이동·점프·인벤토리 입력으로 읽는다.
+        if (key == KeyCode.None)
+            key = char.ToLowerInvariant(input.character) switch { 'w' => KeyCode.W, 'a' => KeyCode.A, 's' => KeyCode.S, 'd' => KeyCode.D, 'i' => KeyCode.I, ' ' => KeyCode.Space, _ => KeyCode.None };
+        if (input.keyCode != KeyCode.None && (key == KeyCode.Space || key == KeyCode.I || key == KeyCode.Escape) && !_windowButtons.Add(key))
+        { input.Use(); return; } // 키를 누른 동안 발생하는 OS 반복 이벤트는 새 조작으로 처리하지 않는다.
+        bool handled = true;
+        // InputSystem에서 이미 읽은 버튼 입력은 창 이벤트에서 중복 처리하지 않는다.
+        if (key == KeyCode.I) { if (keyboard == null || (!keyboard.iKey.wasPressedThisFrame && !keyboard.iKey.isPressed)) { _windowInventory = true; _inputProbe?.RecordWindowKey(key, false, false); } }
+        else if (key == KeyCode.Escape) { if (keyboard == null || (!keyboard.escapeKey.wasPressedThisFrame && !keyboard.escapeKey.isPressed)) _windowEscape = true; }
+        else if (_inventory != null && _inventory.IsOpen) handled = false;
+        else if (key == KeyCode.Space)
+        {
+            if (keyboard == null || (!keyboard.spaceKey.wasPressedThisFrame && !keyboard.spaceKey.isPressed))
+            { _windowJump = true; _inputProbe?.RecordWindowKey(key, _motion.CanJump, !_motion.State.Grounded); }
+        }
+        else if (key == KeyCode.W || key == KeyCode.UpArrow || key == KeyCode.S || key == KeyCode.DownArrow || key == KeyCode.A || key == KeyCode.LeftArrow || key == KeyCode.D || key == KeyCode.RightArrow)
+        {
+            if (input.keyCode != KeyCode.None) _windowKeys.Add(key);
+            if (key == KeyCode.W || key == KeyCode.UpArrow) _windowTapZ = 1;
+            if (key == KeyCode.S || key == KeyCode.DownArrow) _windowTapZ = -1;
+            if (key == KeyCode.A || key == KeyCode.LeftArrow) _windowTapX = -1;
+            if (key == KeyCode.D || key == KeyCode.RightArrow) _windowTapX = 1;
+            _inputProbe?.RecordWindowKey(key, false, false);
+        }
+        else handled = false;
+        if (handled) input.Use();
+    }
     private void Entered(EnterGameData data)
     {
         _busy = false; _characters = Array.Empty<CharacterInfo>();
         if (data.Result != EnterGameResult.Success) { _status = $"Enter: {data.Result}"; return; }
         _offline = false; _localId = data.CharacterId; _status = $"Entered as {data.Name} ({data.CharacterId}).";
+        InventoryRequested(InventoryOperation.Refresh, 0, 0, 0);
         if (_smokeFull) { _smokeEntered = data.CharacterId == _smokeCharacterId; Debug.Log($"3D_FULL_TEST: EnterGame Success character={data.CharacterId} protocol={GameProtocol.ProtocolVersion}"); }
     }
     private void WorldReceived(World3DData world)
@@ -207,6 +285,8 @@ public sealed class Client3DController : MonoBehaviour
         try
         {
             ApplyWorld(_sceneWorld != null ? _sceneWorld.ReadWorld() : World3DData.Preview(), _sceneWorld != null);
+            if (_inventory != null) _inventory.Apply(ItemCatalog.Preview());
+            for (uint i = 1; i <= 3; ++i) CreateMonster(i, (byte)(i - 1)).Apply(new() { Id = i, Kind = (byte)(i - 1), X = -160 + (i - 1) * 25, Z = -100 + (i - 1) * 55 });
             _status = _usingSceneTerrain ? "Placed scene preview: R resets position." : "Offline preview: R resets position.";
         }
         catch (Exception e) { ClearWorld(); _localId = 0; _status = e.Message; Debug.LogException(e); }
@@ -215,11 +295,17 @@ public sealed class Client3DController : MonoBehaviour
     private void Disconnected()
     {
         ClearWorld(); _localId = 0; _offline = false; _busy = _changingMap = false;
+        if (_inventory != null) _inventory.Clear();
         _characters = Array.Empty<CharacterInfo>(); _status = "Game connection closed.";
     }
     private void ClearWorld()
     {
-        _world = null; _motion.Reset(); _sending = false; _failed = false;
+        _world = null; _motion.Reset(); _tapX = _tapZ = 0; _sending = false; _failed = false;
+        ClearWindowInput();
+        _windowButtons.Clear();
+        _hasMonsterTick = false; _monsterTick = 0; _monsterUpdates = 0; _monsterMoved = false;
+        foreach (var monster in _monsters.Values) if (monster != null) Destroy(monster.gameObject); _monsters.Clear();
+        // 인벤토리는 캐릭터 소유 상태이므로 같은 연결의 Map 변경에서도 유지한다.
         _usingSceneTerrain = false;
         if (_sceneWorld != null) _sceneWorld.SetVisible(false);
         foreach (var player in _players.Values) if (player != null) Destroy(player.gameObject); _players.Clear();
@@ -237,6 +323,7 @@ public sealed class Client3DController : MonoBehaviour
         if (!int.TryParse(_port, out int port) || port < 1 || port > 65535) { _status = "Invalid login port."; return; }
         ++_attempt; int attempt = _attempt; _network.DisconnectAll(); ClearWorld(); _localId = 0; _offline = false;
         _characters = Array.Empty<CharacterInfo>(); _busy = true; _deadline = Time.unscaledTimeAsDouble + 10; _connectedHost = _host.Trim();
+        if (_inventory != null) _inventory.Clear();
         try { await _network.ConnectLoginServerAsync(_connectedHost, port); if (attempt == _attempt) await _network.SendLoginAsync(_login, _password); }
         catch (Exception e) { if (attempt == _attempt) { _busy = false; _status = ConnectionError.Describe(e, _connectedHost, port, "LoginServer"); } }
     }
@@ -252,7 +339,7 @@ public sealed class Client3DController : MonoBehaviour
     {
         _busy = false; _characters = data.Result == CharacterListResult.Success ? data.Characters : Array.Empty<CharacterInfo>();
         _status = $"Characters: {data.Result}";
-        if (!_smokeFull) return;
+        if (!_smokeFull && !Array.Exists(Environment.GetCommandLineArgs(), arg => arg == "--manual-full")) return;
         _smokeCharacters = Array.Exists(_characters, character => character.CharacterId == _smokeCharacterId);
         if (!_smokeCharacters) { Debug.LogError("3D_FULL_TEST: Test character missing."); Application.Quit(1); return; }
         Debug.Log("3D_FULL_TEST: CharacterList Success"); SelectCharacter(_smokeCharacterId);
@@ -292,6 +379,41 @@ public sealed class Client3DController : MonoBehaviour
         finally { _sendingChat = false; }
     }
     private void AddChat(string text) { _chatLines.Add(text); if (_chatLines.Count > 100) _chatLines.RemoveAt(0); _chatScroll.y = float.MaxValue; }
+    private async void InventoryRequested(InventoryOperation operation, byte category, byte source, byte target)
+    {
+        if (_inventory == null) return;
+        if (_offline)
+        {
+            // 서버에 접속하지 않은 미리보기에서만 로컬 인벤토리 규칙을 실행한다.
+            var preview = _inventory.Data ?? ItemCatalog.Preview();
+            InventoryPreview.Apply(preview, operation, category, source, target); _inventory.Apply(preview); return;
+        }
+        int attempt = _attempt;
+        // 온라인에서는 수량·HP·MP를 먼저 바꾸지 않고 서버가 반환한 전체 상태를 기다린다.
+        try { await _network.SendInventoryAsync(operation, category, source, target, _inventory.Data?.Revision ?? 0); }
+        catch (Exception e) { if (attempt == _attempt) _inventory.Fail(e.Message); }
+    }
+    private Monster3DView CreateMonster(uint id, byte kind)
+    {
+        if (!_monsters.TryGetValue(id, out var monster))
+        { var obj = new GameObject("Field Slime " + id); monster = obj.AddComponent<Monster3DView>(); monster.Initialize(id, kind); _monsters.Add(id, monster); }
+        return monster;
+    }
+    private void MonstersReceived(FieldMonstersData data)
+    {
+        // 이전 Map·재입장 번호·이미 반영한 tick의 몬스터 상태는 버린다.
+        if (_world == null || data.MapId != _world.MapId || data.Generation != _world.Generation || (_hasMonsterTick && data.Tick <= _monsterTick)) return;
+        _hasMonsterTick = true; _monsterTick = data.Tick; ++_monsterUpdates;
+        HashSet<uint> present = new();
+        foreach (var state in data.Monsters)
+        {
+            present.Add(state.Id); CreateMonster(state.Id, state.Kind).Apply(state);
+            if (state.Id == 1) { if (_monsterUpdates == 1) _firstMonsterX = state.X; else _monsterMoved |= Math.Abs(state.X - _firstMonsterX) > 0.1; }
+        }
+        // 전체 목록에 없는 몬스터는 제거해 서버와 화면의 개체 목록을 맞춘다.
+        List<uint> missing = new(); foreach (var id in _monsters.Keys) if (!present.Contains(id)) missing.Add(id);
+        foreach (var id in missing) { Destroy(_monsters[id].gameObject); _monsters.Remove(id); }
+    }
     private IEnumerator FinishSmoke()
     {
         // 명시한 자동 검증 인자에서만 실행하며 실제 키 입력 검증과 구분한다.
@@ -306,11 +428,12 @@ public sealed class Client3DController : MonoBehaviour
             _terrain.Count == _world.Boxes.Count && (_sceneWorld == null || !_sceneWorld.TerrainRoot.gameObject.activeSelf);
         bool ok = _motion.State.Grounded && _motion.JumpId == 1 && _motion.State.X < 0 && _motion.State.Z > 0 && _world.Boxes.Count == 5 && sceneSourceOk &&
             (!_smokeOnline || (_remoteJump && _remoteLand)) && rendered &&
-            (!_smokeFull || (_smokeLogin && _smokeCharacters && _smokeTicket && _smokeEntered));
+            (!_smokeFull || (_smokeLogin && _smokeCharacters && _smokeTicket && _smokeEntered && _inventory?.Data != null && _inventory.Data.Result == InventoryResult.Success && _monsters.Count == 3 && _monsterUpdates >= 2 && _monsterMoved));
         File.WriteAllText("Logs/3d-smoke-" + label + ".result", (ok ? "PASS" : "FAILED") +
             $"\ngrounded={_motion.State.Grounded} jumpId={_motion.JumpId} x={_motion.State.X} z={_motion.State.Z} remoteJump={_remoteJump} remoteLand={_remoteLand}" +
             $"\nlogin={_smokeLogin} characters={_smokeCharacters} ticket={_smokeTicket} entered={_smokeEntered} protocol={GameProtocol.ProtocolVersion}" +
-            $"\nterrainSource={(_usingSceneTerrain ? "scene" : "server-or-fallback")} terrainSourceOk={sceneSourceOk}");
+            $"\nterrainSource={(_usingSceneTerrain ? "scene" : "server-or-fallback")} terrainSourceOk={sceneSourceOk}" +
+            $"\ninventory={(_inventory?.Data != null)} inventoryRevision={_inventory?.Data?.Revision} monsters={_monsters.Count} monsterUpdates={_monsterUpdates} monsterMoved={_monsterMoved}");
         Debug.Log("3D_PLAYER_SMOKE: " + (ok ? "PASS " : "FAILED ") + label);
         Application.Quit(ok ? 0 : 1);
     }
@@ -338,6 +461,7 @@ public sealed class Client3DController : MonoBehaviour
     }
     private void OnGUI()
     {
+        ReadWindowKeyEvent(Event.current);
         Rect panel = new(10, 10, 370, Math.Max(200, Screen.height - 195));
         Rect chatPanel = new(10, Screen.height - 175, 450, 165);
         if (Event.current.type == EventType.MouseDown && !panel.Contains(Event.current.mousePosition) && !chatPanel.Contains(Event.current.mousePosition)) GUI.FocusControl(null);
@@ -354,11 +478,13 @@ public sealed class Client3DController : MonoBehaviour
         }
         else
         {
-            GUILayout.Label("WASD / Arrows: move · Space: jump · Esc: leave chat");
+            GUILayout.Label("WASD / Arrows: move · Space: jump · I: inventory");
             GUILayout.Label($"Map: {_world?.MapId} · Local: {_localId} · Remote: {_players.Count}");
             var state = _motion.State;
             GUILayout.Label($"Position: {state.X / 20:F2}, {state.Y / 20:F2}, {state.Z / 20:F2} m");
             GUILayout.Label($"Grounded: {state.Grounded} · Jump ready: {_motion.CanJump} · Actions: {_motion.PendingActions}");
+            GUILayout.Label($"Jump ID: {_motion.JumpId} · Field monsters: {_monsters.Count}");
+            if (GUILayout.Button("Inventory [I]")) { GUI.FocusControl(null); if (_inventory != null) _inventory.SetVisible(!_inventory.IsOpen); }
             var sent = _network.MovementSendTraffic; var received = _network.MovementReceiveTraffic; var traffic = _network.GameTraffic;
             GUILayout.Label($"Movement TX: {sent.SentPackets} / {sent.SentBytes} B"); GUILayout.Label($"Movement RX: {received.ReceivedPackets} / {received.ReceivedBytes} B");
             GUILayout.Label($"TCP pending: {traffic.QueuedSendBytes} B · Peak: {traffic.PeakQueuedSendBytes} B");
