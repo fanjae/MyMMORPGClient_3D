@@ -8,6 +8,7 @@ internal static class Program
     {
         try
         {
+            if (args.Length > 0 && args[0] == "--field-tcp") return await FieldIntegration.RunAsync(int.Parse(args[1]));
             if (args.Length > 0 && args[0] == "--tcp") return await TcpAsync(int.Parse(args[1]), int.Parse(args[2]), int.Parse(args[3]));
             void Run(string name, Action test) { test(); Console.WriteLine("[PASS] " + name); }
             Run("XYZ ground motion preserves diagonal speed and wall collision", () =>
@@ -80,7 +81,7 @@ internal static class Program
                 byte[] payload = writer.ToArray(); Check(payload.Length == 118 && Movement3DProtocol.ReadBroadcast(payload).Actions.Count == 1, "3D broadcast layout changed");
                 payload[^1] = 255; bool rejected = false;
                 try { Movement3DProtocol.ReadBroadcast(payload); } catch (InvalidDataException) { rejected = true; }
-                Check(rejected && GameProtocol.ProtocolVersion == 7, "Invalid flags accepted or 3D version wrong");
+                Check(rejected && GameProtocol.ProtocolVersion == 8, "Invalid flags accepted or 3D version wrong");
             });
             Run("Remote silence stops prediction and fresh events resume without sequence replay", () =>
             {
@@ -200,6 +201,9 @@ internal static class Program
                     foreach (var action in batch.Actions) { Actions.Add(action); States[action.CharacterId] = action; Received?.Invoke(action); }
                     break;
                 case GamePacketOpcode.MapInfo: case GamePacketOpcode.PlayerEnterMap: case GamePacketOpcode.PlayerLeaveMap: break;
+                // 몬스터가 없는 이동 전용 Map에서도 빈 목록과 현재 입장 번호를 검증한다.
+                case GamePacketOpcode.FieldMonsters3D:
+                    var monsters = FieldProtocol.ReadMonsters(packet.Payload); Check(monsters.MapId == World.MapId && monsters.Generation == World.Generation, "Wrong monster snapshot generation"); break;
                 default: throw new InvalidDataException("Unexpected 3D fixture opcode " + packet.Opcode);
             }
         }
