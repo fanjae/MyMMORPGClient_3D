@@ -4,6 +4,7 @@ using UnityEngine.EventSystems;
 
 public sealed class InventorySlot : MonoBehaviour, IPointerClickHandler, IBeginDragHandler, IEndDragHandler, IDropHandler, IDragHandler
 {
+    private InventoryEntry _rendered; private bool _selected, _busy, _ready;
     private InventoryWindow _owner; private int _index; private Text _quantity; private Image _background; private InventoryItemIcon _icon;
     public void Bind(InventoryWindow owner, int index)
     {
@@ -12,6 +13,9 @@ public sealed class InventorySlot : MonoBehaviour, IPointerClickHandler, IBeginD
     }
     public void Render(InventoryEntry entry, bool selected, bool busy)
     {
+        // 슬롯 내용과 표시 상태가 같으면 Text·Graphic을 다시 갱신하지 않는다.
+        if (_ready && entry.ItemId == _rendered.ItemId && entry.Quantity == _rendered.Quantity && selected == _selected && busy == _busy) return;
+        _ready = true; _rendered = entry; _selected = selected; _busy = busy;
         _icon.ItemId = entry.ItemId; _quantity.text = entry.Quantity > 1 ? entry.Quantity.ToString() : "";
         _background.color = selected ? new Color(1, 0.81f, 0.43f) : new Color(0.87f, 0.94f, 0.93f);
         _icon.color = busy ? new Color(1, 1, 1, 0.5f) : Color.white;

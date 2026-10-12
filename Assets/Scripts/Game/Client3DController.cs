@@ -11,6 +11,9 @@ public sealed class Client3DController : MonoBehaviour
 {
     private NetworkManager3D _network;
     private InventoryWindow _inventory;
+    private FieldVitalsHUD _hud;
+    private readonly BasicAttack3D _attack = new();
+    private bool _windowAttack;
     private InputProbe3D _inputProbe;
     private readonly Dictionary<uint, Monster3DView> _monsters = new();
     private ulong _monsterTick;
@@ -20,9 +23,12 @@ public sealed class Client3DController : MonoBehaviour
     private bool _monsterMoved;
     // 화면 갱신 사이의 짧은 입력도 다음 고정 이동 단계까지 보존한다.
     private int _tapX, _tapZ;
+    private readonly GameplayInput3D _inputGate = new();
+    private readonly HashSet<uint> _presentMonsters = new();
+    private readonly List<uint> _missingMonsters = new();
     private readonly HashSet<KeyCode> _windowKeys = new();
     private readonly HashSet<KeyCode> _windowButtons = new();
-    private bool _windowJump, _windowInventory, _windowEscape;
+    private bool _windowJump, _windowInventory, _windowEscape, _clearGuiFocus;
     private int _windowTapX, _windowTapZ;
     private readonly ClientMotion3D _motion = new();
     private readonly Dictionary<uint, Player3DView> _players = new();
@@ -59,8 +65,11 @@ public sealed class Client3DController : MonoBehaviour
         _network = GetComponent<NetworkManager3D>();
         _inventory = FindFirstObjectByType<InventoryWindow>();
         _inputProbe = GetComponent<InputProbe3D>();
+        _hud = FindFirstObjectByType<FieldVitalsHUD>(FindObjectsInactive.Include);
+        if (_hud != null) _hud.AttackRequested += RequestAttack;
+        _network.AttackReceived += AttackReceived;
         if (_inventory != null) _inventory.Requested += InventoryRequested;
-        _network.InventoryReceived += data => { if (_inventory != null) _inventory.Apply(data); };
+        _network.InventoryReceived += data => { if (_inventory != null) _inventory.Apply(data); if (_hud != null) _hud.Apply(_inventory?.Data); };
         _network.FieldMonstersReceived += MonstersReceived;
         _sceneWorld = FindFirstObjectByType<SceneWorld3D>();
         if (_sceneWorld != null) _sceneWorld.SetVisible(false);
@@ -123,17 +132,38 @@ public sealed class Client3DController : MonoBehaviour
         if (_offline)
             foreach (var monster in _monsters.Values)
             {
-                var state = monster.State; state.X = -160 + (state.Id - 1) * 25 + Math.Sin((Time.unscaledTimeAsDouble - _smokeStarted) * 0.55 + state.Id) * 35;
+                var state = monster.State;
+                if (state.Hp == 0) { if (!monster.PreviewRespawnReady) continue; state.Hp = state.MaxHp; ++state.Revision; }
+                state.X = -160 + (state.Id - 1) * 25 + Math.Sin((Time.unscaledTimeAsDouble - _smokeStarted) * 0.55 + state.Id) * 35;
                 state.Yaw = (ushort)(Math.Cos((Time.unscaledTimeAsDouble - _smokeStarted) * 0.55 + state.Id) > 0 ? 9000 : 27000); monster.Apply(state);
             }
         Keyboard k = Keyboard.current;
-        if (_windowEscape || (k != null && k.escapeKey.wasPressedThisFrame)) { _windowEscape = false; GUI.FocusControl(null); if (_inventory != null) _inventory.SetVisible(false); }
+        if (_windowEscape || (k != null && k.escapeKey.wasPressedThisFrame)) { _windowEscape = false; _clearGuiFocus = true; if (_inventory != null) _inventory.SetVisible(false); }
         if ((_windowInventory || (k != null && k.iKey.wasPressedThisFrame)) && GUIUtility.keyboardControl == 0 && _inventory != null)
-        { _inventory.SetVisible(!_inventory.IsOpen); if (_inventory.IsOpen && !_offline && _inventory.Data != null) InventoryRequested(InventoryOperation.Refresh, 0, 0, 0); }
+        { _inventory.SetVisible(!_inventory.IsOpen); }
         _windowInventory = false;
         // 채팅·인벤토리·Map 변경·창 비활성화 중에는 캐릭터 조작을 멈춘다.
         bool allowed = Application.isFocused && GUIUtility.keyboardControl == 0 && !_changingMap && k != null && (_inventory == null || !_inventory.IsOpen);
-        if (_inputProbe != null) _inputProbe.Observe(k, allowed, _inventory != null && _inventory.IsOpen, _usingSceneTerrain, _motion);
+        int held = 0;
+        if (k != null)
+        {
+            if (k.dKey.isPressed || k.rightArrowKey.isPressed || _windowKeys.Contains(KeyCode.D) || _windowKeys.Contains(KeyCode.RightArrow)) held |= GameplayInput3D.Right;
+            if (k.aKey.isPressed || k.leftArrowKey.isPressed || _windowKeys.Contains(KeyCode.A) || _windowKeys.Contains(KeyCode.LeftArrow)) held |= GameplayInput3D.Left;
+            if (k.wKey.isPressed || k.upArrowKey.isPressed || _windowKeys.Contains(KeyCode.W) || _windowKeys.Contains(KeyCode.UpArrow)) held |= GameplayInput3D.Forward;
+            if (k.sKey.isPressed || k.downArrowKey.isPressed || _windowKeys.Contains(KeyCode.S) || _windowKeys.Contains(KeyCode.DownArrow)) held |= GameplayInput3D.Back;
+            if (k.spaceKey.isPressed || _windowButtons.Contains(KeyCode.Space)) held |= GameplayInput3D.Jump;
+        }
+        if (k != null && (k.jKey.isPressed || k.leftCtrlKey.isPressed || _windowButtons.Contains(KeyCode.J) || _windowButtons.Contains(KeyCode.LeftControl))) held |= GameplayInput3D.Attack;
+        int active = _inputGate.Filter(allowed, held);
+        if (allowed && _inputGate.CanPress(GameplayInput3D.Attack) && (_windowAttack || k.jKey.wasPressedThisFrame || k.leftCtrlKey.wasPressedThisFrame)) RequestAttack();
+        _windowAttack = false;
+        if (!allowed) _attack.Cancel();
+        if (_inputProbe != null)
+        {
+            double firstX = _monsters.TryGetValue(1, out var first) ? first.State.X : 0;
+            _inputProbe.RecordField(_world, _inventory?.Data, _players.Count, _monsters.Count, _remoteJump, _remoteLand, firstX, _smoke);
+            _inputProbe.Observe(k, allowed, _inventory != null && _inventory.IsOpen, _usingSceneTerrain, _motion);
+        }
         if (_smoke)
         {
             if (_smokeOnline && !_smokePeerReady)
@@ -147,19 +177,20 @@ public sealed class Client3DController : MonoBehaviour
         }
         else if (allowed)
         {
-            int x = ((k.dKey.isPressed || k.rightArrowKey.isPressed || _windowKeys.Contains(KeyCode.D) || _windowKeys.Contains(KeyCode.RightArrow)) ? 1 : 0) - ((k.aKey.isPressed || k.leftArrowKey.isPressed || _windowKeys.Contains(KeyCode.A) || _windowKeys.Contains(KeyCode.LeftArrow)) ? 1 : 0);
-            int z = ((k.wKey.isPressed || k.upArrowKey.isPressed || _windowKeys.Contains(KeyCode.W) || _windowKeys.Contains(KeyCode.UpArrow)) ? 1 : 0) - ((k.sKey.isPressed || k.downArrowKey.isPressed || _windowKeys.Contains(KeyCode.S) || _windowKeys.Contains(KeyCode.DownArrow)) ? 1 : 0);
+            int x = ((active & GameplayInput3D.Right) != 0 ? 1 : 0) - ((active & GameplayInput3D.Left) != 0 ? 1 : 0);
+            int z = ((active & GameplayInput3D.Forward) != 0 ? 1 : 0) - ((active & GameplayInput3D.Back) != 0 ? 1 : 0);
             // 한 프레임 안에 눌렀다 뗀 입력도 최소 한 번의 고정 이동 단계에 반영한다.
             int tapX = ((k.dKey.wasPressedThisFrame || k.rightArrowKey.wasPressedThisFrame) ? 1 : 0) - ((k.aKey.wasPressedThisFrame || k.leftArrowKey.wasPressedThisFrame) ? 1 : 0);
             int tapZ = ((k.wKey.wasPressedThisFrame || k.upArrowKey.wasPressedThisFrame) ? 1 : 0) - ((k.sKey.wasPressedThisFrame || k.downArrowKey.wasPressedThisFrame) ? 1 : 0);
             if (tapX != 0) _tapX = tapX; else if (_windowTapX != 0) _tapX = _windowTapX;
             if (tapZ != 0) _tapZ = tapZ; else if (_windowTapZ != 0) _tapZ = _windowTapZ;
             _windowTapX = _windowTapZ = 0;
-            if (x == 0) x = _tapX; if (z == 0) z = _tapZ;
-            _motion.SetInput(x, z, k.spaceKey.wasPressedThisFrame || _windowJump); _windowJump = false;
+            if (x == 0 && _inputGate.CanPress(_tapX > 0 ? GameplayInput3D.Right : GameplayInput3D.Left)) x = _tapX;
+            if (z == 0 && _inputGate.CanPress(_tapZ > 0 ? GameplayInput3D.Forward : GameplayInput3D.Back)) z = _tapZ;
+            _motion.SetInput(x, z, (k.spaceKey.wasPressedThisFrame || _windowJump) && _inputGate.CanPress(GameplayInput3D.Jump)); _windowJump = false;
             if (_offline && k.rKey.wasPressedThisFrame) _motion.Configure(_world);
         }
-        else { ClearWindowInput(); _motion.StopInput(); }
+        else { ClearWindowInput(false); _motion.StopInput(); }
         try
         {
             ulong beforeTick = _motion.Tick; _motion.Advance(Time.unscaledDeltaTime);
@@ -180,32 +211,42 @@ public sealed class Client3DController : MonoBehaviour
     private async void SendMovement(Motion3DBatch batch, World3DData world)
     {
         _sending = true;
-        try { await _network.SendMovementActionsAsync(batch); }
+        bool attack = _attack.Take(batch, out ulong attackSequence, out ulong actionSequence);
+        try
+        {
+            await _network.SendMovementActionsAsync(batch);
+            if (attack && ReferenceEquals(_world, world))
+                await _network.SendAttackAsync(world.MapId, world.Generation, attackSequence, actionSequence);
+        }
         catch (Exception e) { if (ReferenceEquals(_world, world)) { _failed = true; _status = e.Message; } }
         finally { if (ReferenceEquals(_world, world)) _sending = false; }
     }
     // 포커스를 잃으면 눌린 키와 대기 입력을 비워 복귀 후 이동·점프가 남지 않도록 한다.
-    private void OnApplicationFocus(bool focused) { if (!focused) { ClearWindowInput(); _windowButtons.Clear(); _motion.StopInput(); } }
-    private void ClearWindowInput() { _windowKeys.Clear(); _tapX = _tapZ = _windowTapX = _windowTapZ = 0; _windowJump = _windowInventory = _windowEscape = false; }
+    private void OnApplicationFocus(bool focused) { if (!focused) { _attack.Cancel(); _inputGate.Reset(); ClearWindowInput(); _windowButtons.Clear(); _motion.StopInput(); } }
+    private void ClearWindowInput(bool releaseKeys = true) { if (releaseKeys) _windowKeys.Clear(); _tapX = _tapZ = _windowTapX = _windowTapZ = 0; _windowJump = _windowInventory = _windowEscape = _windowAttack = false; }
     private void ReadWindowKeyEvent(Event input)
     {
         // InputSystem에 상태가 잡히지 않는 키보드 입력은 실제 창 이벤트로 보완한다.
         // 일반 키보드 경로와 함께 사용하되 고정 이동 단계가 실행될 때까지 입력을 보존한다.
         if (_smoke || !Application.isFocused || !_motion.Ready) return;
         if (input.type == EventType.KeyUp) { _windowKeys.Remove(input.keyCode); _windowButtons.Remove(input.keyCode); return; }
-        if (input.type != EventType.KeyDown || GUIUtility.keyboardControl != 0) return;
+        if (input.type != EventType.KeyDown) return;
+        // 채팅 입력 중에도 Esc는 포커스 해제로 처리하고 일반 문자는 게임 조작에 쓰지 않는다.
+        if (GUIUtility.keyboardControl != 0 && input.keyCode != KeyCode.Escape) return;
         Keyboard keyboard = Keyboard.current;
         KeyCode key = input.keyCode;
         // 키 코드 없이 문자만 전달된 창 이벤트도 이동·점프·인벤토리 입력으로 읽는다.
         if (key == KeyCode.None)
-            key = char.ToLowerInvariant(input.character) switch { 'w' => KeyCode.W, 'a' => KeyCode.A, 's' => KeyCode.S, 'd' => KeyCode.D, 'i' => KeyCode.I, ' ' => KeyCode.Space, _ => KeyCode.None };
-        if (input.keyCode != KeyCode.None && (key == KeyCode.Space || key == KeyCode.I || key == KeyCode.Escape) && !_windowButtons.Add(key))
+            key = char.ToLowerInvariant(input.character) switch { 'w' => KeyCode.W, 'a' => KeyCode.A, 's' => KeyCode.S, 'd' => KeyCode.D, 'i' => KeyCode.I, 'j' => KeyCode.J, ' ' => KeyCode.Space, _ => KeyCode.None };
+        if (input.keyCode != KeyCode.None && (key == KeyCode.Space || key == KeyCode.I || key == KeyCode.Escape || key == KeyCode.J || key == KeyCode.LeftControl) && !_windowButtons.Add(key))
         { input.Use(); return; } // 키를 누른 동안 발생하는 OS 반복 이벤트는 새 조작으로 처리하지 않는다.
         bool handled = true;
         // InputSystem에서 이미 읽은 버튼 입력은 창 이벤트에서 중복 처리하지 않는다.
         if (key == KeyCode.I) { if (keyboard == null || (!keyboard.iKey.wasPressedThisFrame && !keyboard.iKey.isPressed)) { _windowInventory = true; _inputProbe?.RecordWindowKey(key, false, false); } }
         else if (key == KeyCode.Escape) { if (keyboard == null || (!keyboard.escapeKey.wasPressedThisFrame && !keyboard.escapeKey.isPressed)) _windowEscape = true; }
         else if (_inventory != null && _inventory.IsOpen) handled = false;
+        else if (key == KeyCode.J || key == KeyCode.LeftControl)
+        { if (keyboard == null || !(keyboard.jKey.wasPressedThisFrame || keyboard.leftCtrlKey.wasPressedThisFrame)) _windowAttack = true; }
         else if (key == KeyCode.Space)
         {
             if (keyboard == null || (!keyboard.spaceKey.wasPressedThisFrame && !keyboard.spaceKey.isPressed))
@@ -228,7 +269,7 @@ public sealed class Client3DController : MonoBehaviour
         _busy = false; _characters = Array.Empty<CharacterInfo>();
         if (data.Result != EnterGameResult.Success) { _status = $"Enter: {data.Result}"; return; }
         _offline = false; _localId = data.CharacterId; _status = $"Entered as {data.Name} ({data.CharacterId}).";
-        InventoryRequested(InventoryOperation.Refresh, 0, 0, 0);
+        if (_inventory != null) _inventory.RefreshFromServer();
         if (_smokeFull) { _smokeEntered = data.CharacterId == _smokeCharacterId; Debug.Log($"3D_FULL_TEST: EnterGame Success character={data.CharacterId} protocol={GameProtocol.ProtocolVersion}"); }
     }
     private void WorldReceived(World3DData world)
@@ -239,6 +280,7 @@ public sealed class Client3DController : MonoBehaviour
     {
         ClearWorld(); _world = world; _motion.Configure(world); _failed = false;
         _usingSceneTerrain = useSceneTerrain;
+        if (_hud != null) { _hud.SetVisible(true); _hud.Apply(_inventory?.Data); }
         if (_usingSceneTerrain) _sceneWorld.SetVisible(true);
         else foreach (var box in world.Boxes)
         {
@@ -285,8 +327,8 @@ public sealed class Client3DController : MonoBehaviour
         try
         {
             ApplyWorld(_sceneWorld != null ? _sceneWorld.ReadWorld() : World3DData.Preview(), _sceneWorld != null);
-            if (_inventory != null) _inventory.Apply(ItemCatalog.Preview());
-            for (uint i = 1; i <= 3; ++i) CreateMonster(i, (byte)(i - 1)).Apply(new() { Id = i, Kind = (byte)(i - 1), X = -160 + (i - 1) * 25, Z = -100 + (i - 1) * 55 });
+            if (_inventory != null) { _inventory.Clear(); _inventory.Apply(ItemCatalog.Preview()); if (_hud != null) _hud.Apply(_inventory.Data); }
+            for (uint i = 1; i <= 3; ++i) CreateMonster(i, (byte)(i - 1)).Apply(new() { Id = i, Kind = (byte)(i - 1), X = -160 + (i - 1) * 25, Z = -100 + (i - 1) * 55, Hp = 60, MaxHp = 60, Revision = 1 });
             _status = _usingSceneTerrain ? "Placed scene preview: R resets position." : "Offline preview: R resets position.";
         }
         catch (Exception e) { ClearWorld(); _localId = 0; _status = e.Message; Debug.LogException(e); }
@@ -301,7 +343,8 @@ public sealed class Client3DController : MonoBehaviour
     private void ClearWorld()
     {
         _world = null; _motion.Reset(); _tapX = _tapZ = 0; _sending = false; _failed = false;
-        ClearWindowInput();
+        _attack.Cancel(); if (_hud != null) _hud.SetVisible(false);
+        _inputGate.Reset(); ClearWindowInput();
         _windowButtons.Clear();
         _hasMonsterTick = false; _monsterTick = 0; _monsterUpdates = 0; _monsterMoved = false;
         foreach (var monster in _monsters.Values) if (monster != null) Destroy(monster.gameObject); _monsters.Clear();
@@ -386,12 +429,45 @@ public sealed class Client3DController : MonoBehaviour
         {
             // 서버에 접속하지 않은 미리보기에서만 로컬 인벤토리 규칙을 실행한다.
             var preview = _inventory.Data ?? ItemCatalog.Preview();
-            InventoryPreview.Apply(preview, operation, category, source, target); _inventory.Apply(preview); return;
+            InventoryPreview.Apply(preview, operation, category, source, target); _inventory.Apply(preview); if (_hud != null) _hud.Apply(_inventory.Data); return;
         }
         int attempt = _attempt;
         // 온라인에서는 수량·HP·MP를 먼저 바꾸지 않고 서버가 반환한 전체 상태를 기다린다.
         try { await _network.SendInventoryAsync(operation, category, source, target, _inventory.Data?.Revision ?? 0); }
         catch (Exception e) { if (attempt == _attempt) _inventory.Fail(e.Message); }
+    }
+    private void RequestAttack()
+    {
+        bool allowed = Application.isFocused && GUIUtility.keyboardControl == 0 && _motion.Ready && !_changingMap && !_failed &&
+            (_inventory == null || !_inventory.IsOpen) && _inventory?.Data?.Hp > 0;
+        if (!_attack.Queue(allowed, Time.unscaledTimeAsDouble, _motion)) return;
+        // 검 표시는 입력 즉시 재생하고 실제 피해와 몬스터 HP는 서버 결과를 기다린다.
+        _local.PlayAttack();
+        if (_offline)
+        {
+            _attack.Cancel();
+            Monster3DView target = null; double best = 60 * 60;
+            var pose = _motion.State; double radians = pose.Yaw / 100.0 * Math.PI / 180;
+            foreach (var monster in _monsters.Values)
+            {
+                var state = monster.State; double dx = state.X - pose.X, dz = state.Z - pose.Z, distance = dx * dx + dz * dz;
+                if (state.Hp == 0 || distance > best || Math.Abs(state.Y - pose.Y) > 30 ||
+                    (distance > 0.00001 && (dx * Math.Sin(radians) + dz * Math.Cos(radians)) / Math.Sqrt(distance) < 0.35)) continue;
+                best = distance; target = monster;
+            }
+            if (target != null) { var state = target.State; ushort damage = (ushort)Math.Min(20, (int)state.Hp); state.Hp -= damage; ++state.Revision;
+                target.Apply(state); target.ShowDamage(damage); if (_hud != null) _hud.Report(state.Hp == 0 ? BasicAttackResult.Killed : BasicAttackResult.Hit); }
+            else if (_hud != null) _hud.Report(BasicAttackResult.Miss);
+        }
+    }
+    private void AttackReceived(BasicAttackData data)
+    {
+        if (_world == null || data.MapId != _world.MapId || data.Generation != _world.Generation) return;
+        bool swing = data.Result <= BasicAttackResult.Killed;
+        if (data.CharacterId == _localId) { if (_hud != null) _hud.Report(data.Result); }
+        else if (swing && _players.TryGetValue(data.CharacterId, out var player)) player.PlayAttack();
+        if (data.MonsterId != 0 && _monsters.TryGetValue(data.MonsterId, out var monster) && data.Revision >= monster.State.Revision)
+        { var state = monster.State; state.Hp = data.Hp; state.MaxHp = data.MaxHp; state.Revision = data.Revision; monster.Apply(state); monster.ShowDamage(data.Damage); }
     }
     private Monster3DView CreateMonster(uint id, byte kind)
     {
@@ -404,15 +480,15 @@ public sealed class Client3DController : MonoBehaviour
         // 이전 Map·재입장 번호·이미 반영한 tick의 몬스터 상태는 버린다.
         if (_world == null || data.MapId != _world.MapId || data.Generation != _world.Generation || (_hasMonsterTick && data.Tick <= _monsterTick)) return;
         _hasMonsterTick = true; _monsterTick = data.Tick; ++_monsterUpdates;
-        HashSet<uint> present = new();
+        _presentMonsters.Clear(); _missingMonsters.Clear();
         foreach (var state in data.Monsters)
         {
-            present.Add(state.Id); CreateMonster(state.Id, state.Kind).Apply(state);
+            _presentMonsters.Add(state.Id); CreateMonster(state.Id, state.Kind).Apply(state, data.Tick);
             if (state.Id == 1) { if (_monsterUpdates == 1) _firstMonsterX = state.X; else _monsterMoved |= Math.Abs(state.X - _firstMonsterX) > 0.1; }
         }
         // 전체 목록에 없는 몬스터는 제거해 서버와 화면의 개체 목록을 맞춘다.
-        List<uint> missing = new(); foreach (var id in _monsters.Keys) if (!present.Contains(id)) missing.Add(id);
-        foreach (var id in missing) { Destroy(_monsters[id].gameObject); _monsters.Remove(id); }
+        foreach (var id in _monsters.Keys) if (!_presentMonsters.Contains(id)) _missingMonsters.Add(id);
+        foreach (var id in _missingMonsters) { Destroy(_monsters[id].gameObject); _monsters.Remove(id); }
     }
     private IEnumerator FinishSmoke()
     {
@@ -461,9 +537,11 @@ public sealed class Client3DController : MonoBehaviour
     }
     private void OnGUI()
     {
+        // IMGUI 포커스 변경은 Update가 아닌 GUI 처리 안에서 적용한다.
+        if (_clearGuiFocus) { GUI.FocusControl(null); GUIUtility.keyboardControl = 0; _clearGuiFocus = false; }
         ReadWindowKeyEvent(Event.current);
-        Rect panel = new(10, 10, 370, Math.Max(200, Screen.height - 195));
-        Rect chatPanel = new(10, Screen.height - 175, 450, 165);
+        Rect panel = new(10, 10, 370, Math.Max(120, Screen.height - 295));
+        Rect chatPanel = new(10, Screen.height - 275, 450, 165);
         if (Event.current.type == EventType.MouseDown && !panel.Contains(Event.current.mousePosition) && !chatPanel.Contains(Event.current.mousePosition)) GUI.FocusControl(null);
         GUILayout.BeginArea(panel, GUI.skin.box); _panelScroll = GUILayout.BeginScrollView(_panelScroll);
         GUILayout.Label($"MyMMORPG 3D · Game protocol {GameProtocol.ProtocolVersion}"); GUILayout.Label(_status);
@@ -478,7 +556,7 @@ public sealed class Client3DController : MonoBehaviour
         }
         else
         {
-            GUILayout.Label("WASD / Arrows: move · Space: jump · I: inventory");
+            GUILayout.Label("WASD / Arrows: move · Space: jump · J / Ctrl: attack · I: inventory");
             GUILayout.Label($"Map: {_world?.MapId} · Local: {_localId} · Remote: {_players.Count}");
             var state = _motion.State;
             GUILayout.Label($"Position: {state.X / 20:F2}, {state.Y / 20:F2}, {state.Z / 20:F2} m");

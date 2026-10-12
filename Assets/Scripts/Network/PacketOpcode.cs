@@ -35,5 +35,6 @@ public enum GamePacketOpcode : ushort
     MovementActions = 23,
     MovementActionsBroadcast = 24, World3D = 25, WorldBox3D = 26, WorldEnd3D = 27, MovementState3D = 28, MovementActions3D = 29, MovementActionsBroadcast3D = 30,
     // 서버 Protocol/FieldPacket.h의 인벤토리 상태와 3D 필드 몬스터 목록을 사용한다.
-    InventoryRequest = 31, InventorySnapshot = 32, FieldMonsters3D = 33
+    InventoryRequest = 31, InventorySnapshot = 32, FieldMonsters3D = 33,
+    BasicAttackRequest3D = 34, BasicAttackEvent3D = 35
 }

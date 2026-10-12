@@ -51,6 +51,8 @@ public sealed class ClientMotion3D
             _changed = false; _accumulator = Math.Max(0, _accumulator - Motion3DSimulation.FixedDelta);
         }
     }
+    // 공격 직전 위치도 기존 이동 송신 상한 안에서 서버에 먼저 전달한다.
+    public ulong AttackCheckpoint() { if (!Ready) return 0; Enqueue(Action3DKind.Checkpoint); return _sequence; }
     private void Enqueue(Action3DKind kind)
     {
         if (_pending.Count >= 128) throw new InvalidOperationException("3D movement action queue limit reached");

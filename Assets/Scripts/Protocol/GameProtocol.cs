@@ -126,8 +126,8 @@ public struct ChangeMapData
 public static class GameProtocol
 {
     public const int MaxPlayerNameLength = LoginProtocol.MaxCharacterNameLength;
-    // 인벤토리와 공유 몬스터 패킷을 사용하는 서버의 3D version 8과 맞춘다.
-    public const uint ProtocolVersion = 8;
+    // 몬스터 HP와 기본 공격 패킷을 사용하는 서버의 3D version 9와 맞춘다.
+    public const uint ProtocolVersion = 9;
     public const int MaxChatMessageLength = 128;
     private const int PlayerDataSize = 4 + MaxPlayerNameLength + 2 + 4 + 4;
 

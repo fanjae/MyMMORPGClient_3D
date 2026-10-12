@@ -10,6 +10,8 @@ public sealed class Player3DView : MonoBehaviour
     private readonly RemoteMotion3D _remote = new();
     private Vector3 _target;
     private float _yaw;
+    private Transform _weapon;
+    private double _attackUntil;
     private readonly List<Material> _materials = new();
     public void Initialize(uint id, World3DData world, bool local)
     {
@@ -30,6 +32,11 @@ public sealed class Player3DView : MonoBehaviour
         var faceMaterial = CreateMaterial(Color.white);
         _materials.Add(faceMaterial);
         face.GetComponent<Renderer>().material = faceMaterial;
+        // 기본 공격 표시는 추가 애니메이션 자산 없이 손 옆의 검을 짧게 휘두른다.
+        var sword = GameObject.CreatePrimitive(PrimitiveType.Cube); sword.name = "Basic attack sword"; sword.transform.SetParent(transform, false);
+        Destroy(sword.GetComponent<Collider>()); _weapon = sword.transform; _weapon.localPosition = new(0.65f, 0.85f, 0.5f); _weapon.localScale = new(0.12f, 0.85f, 0.12f);
+        var swordMaterial = CreateMaterial(new(1, 0.8f, 0.3f)); _materials.Add(swordMaterial); sword.GetComponent<Renderer>().sharedMaterial = swordMaterial;
+        sword.SetActive(false);
         SetLocal(new Motion3DSimulation(world).Spawn());
     }
     public void ConfigureRemote(World3DData world, Relay3DAction snapshot, double now)
@@ -43,8 +50,15 @@ public sealed class Player3DView : MonoBehaviour
     {
         transform.position = Position(state); transform.rotation = Quaternion.Euler(0, state.Yaw / 100f, 0);
     }
+    public void PlayAttack() { _attackUntil = Time.unscaledTimeAsDouble + 0.24; _weapon.gameObject.SetActive(true); }
     private void Update()
     {
+        if (_weapon != null && _weapon.gameObject.activeSelf)
+        {
+            float remaining = (float)(_attackUntil - Time.unscaledTimeAsDouble);
+            if (remaining <= 0) _weapon.gameObject.SetActive(false);
+            else _weapon.localRotation = Quaternion.Euler(0, Mathf.Lerp(70, -70, remaining / 0.24f), 55);
+        }
         if (Local || !_remote.Sample(Time.unscaledTimeAsDouble, out var state)) return;
         _target = Position(state); _yaw = state.Yaw / 100f;
         LastGap = Vector3.Distance(transform.position, _target);

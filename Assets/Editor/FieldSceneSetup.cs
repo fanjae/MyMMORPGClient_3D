@@ -19,8 +19,11 @@ public static class FieldSceneSetup
             var canvas = new GameObject("Field Inventory Canvas", typeof(RectTransform));
             InventoryWindow.BuildLayout(canvas);
         }
+        if (inventory != null) InventoryWindow.EnsureControls(inventory.gameObject);
+        inventory = Object.FindFirstObjectByType<InventoryWindow>();
+        if (inventory != null) FieldVitalsHUD.EnsureLayout(inventory.gameObject);
         // 실행 파일에서도 같은 배치를 사용하도록 씬과 자산을 저장한다.
         EditorSceneManager.MarkSceneDirty(scene); EditorSceneManager.SaveScene(scene); AssetDatabase.SaveAssets();
-        Debug.Log("FIELD_SCENE_SETUP: inventory Canvas, slots, tabs and keyboard probe saved in SampleScene");
+        Debug.Log("FIELD_SCENE_SETUP: inventory, HP/MP HUD and keyboard probe saved in SampleScene");
     }
 }

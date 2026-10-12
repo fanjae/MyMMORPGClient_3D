@@ -3,6 +3,14 @@
   <ItemGroup>
     <Compile Include="Program.cs" />
     <Compile Include="FieldIntegration.cs" />
+    <Compile Include="FieldHardeningTests.cs" />
+    <Compile Include="CombatTests.cs" />
+    <Compile Include="../../Assets/Scripts/Game/BasicAttack3D.cs" />
+    <Compile Include="../../Assets/Scripts/Game/VitalsFill.cs" />
+    <Compile Include="FieldServerIntegration.cs" />
+    <Compile Include="../../Assets/Scripts/Game/GameplayInput3D.cs" />
+    <Compile Include="../../Assets/Scripts/Game/InventoryRecovery3D.cs" />
+    <Compile Include="../../Assets/Scripts/Game/MonsterMotion3D.cs" />
     <Compile Include="../../Assets/Scripts/Protocol/FieldProtocol.cs" />
     <Compile Include="../../Assets/Scripts/Game/ItemCatalog.cs" />
     <Compile Include="../../Assets/Scripts/Game/InventoryPreview.cs" />

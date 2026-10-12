@@ -37,6 +37,7 @@ public sealed class NetworkManager3D : MonoBehaviour
     public event Action<MonsterEnterData> MonsterEntered;
     public event Action<InventoryData> InventoryReceived;
     public event Action<FieldMonstersData> FieldMonstersReceived;
+    public event Action<BasicAttackData> AttackReceived;
     public event Action<ChangeMapData> MapChanged;
     public event Action LoginDisconnected;
     public event Action GameDisconnected;
@@ -132,6 +133,9 @@ public sealed class NetworkManager3D : MonoBehaviour
     {
         return _gameSession.SendAsync((ushort)GamePacketOpcode.InventoryRequest, FieldProtocol.InventoryRequest(operation, category, source, target, revision));
     }
+
+    public Task SendAttackAsync(uint map, ulong generation, ulong sequence, ulong actionSequence) =>
+        _gameSession.SendAsync((ushort)GamePacketOpcode.BasicAttackRequest3D, CombatProtocol.Request(map, generation, sequence, actionSequence));
 
     public Task SendChatAsync(string message)
     {
@@ -245,6 +249,8 @@ public sealed class NetworkManager3D : MonoBehaviour
                 case GamePacketOpcode.InventorySnapshot:
                     InventoryReceived?.Invoke(FieldProtocol.ReadInventory(payload));
                     break;
+                case GamePacketOpcode.BasicAttackEvent3D:
+                    AttackReceived?.Invoke(CombatProtocol.Read(payload)); break;
                 case GamePacketOpcode.FieldMonsters3D:
                     FieldMonstersReceived?.Invoke(FieldProtocol.ReadMonsters(payload));
                     break;
