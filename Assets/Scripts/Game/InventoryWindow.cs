@@ -7,7 +7,8 @@ using UnityEngine.InputSystem.UI;
 // 편집기에서 SampleScene에 저장한 Canvas·탭·슬롯을 연결해 인벤토리를 표시한다.
 public sealed class InventoryWindow : MonoBehaviour
 {
-    public event Action<InventoryOperation, byte, byte, byte> Requested;
+    public event Action<InventoryOperation, byte, byte, byte, ulong> Requested;
+    private ulong _nextRequestId, _pendingRequestId;
     public InventoryData Data { get; private set; }
     public bool IsOpen => _panel != null && _panel.gameObject.activeSelf;
     public bool Busy => _recovery.Busy;
@@ -19,6 +20,10 @@ public sealed class InventoryWindow : MonoBehaviour
     private readonly InventorySlot[] _slots = new InventorySlot[24];
     private readonly Button[] _tabs = new Button[5];
     private Button _use, _sort, _retry;
+    private GameObject _equipment;
+    private Button _equip;
+    private readonly Text[] _equippedLabels=new Text[2];
+    private readonly Button[] _unequip=new Button[2];
     private int _selected = -1;
     private static readonly Color Ink = new(0.18f, 0.25f, 0.34f), Paper = new(1f, 0.98f, 0.91f), Accent = new(1f, 0.57f, 0.19f);
 
@@ -33,6 +38,9 @@ public sealed class InventoryWindow : MonoBehaviour
         if (retry != null) { _retry = retry.GetComponent<Button>(); _retry.onClick.AddListener(RefreshFromServer); }
         _use.onClick.AddListener(() => Request(InventoryOperation.Use, _selected, 0));
         _sort.onClick.AddListener(() => Request(InventoryOperation.Sort, 0, 0));
+        _equip=_panel.Find("Equip").GetComponent<Button>(); _equip.onClick.AddListener(()=>Request(InventoryOperation.Equip,_selected,0));
+        _equipment=transform.Find("Equipment Panel").gameObject;
+        for (int i=0;i<2;++i) { int slot=i; _equippedLabels[i]=_equipment.transform.Find("Item "+i).GetComponent<Text>(); _unequip[i]=_equipment.transform.Find("Remove "+i).GetComponent<Button>(); _unequip[i].onClick.AddListener(()=>Unequip(slot)); }
         for (int i = 0; i < 5; ++i) { int category = i; _tabs[i] = _panel.Find("Tab " + i).GetComponent<Button>(); _tabs[i].onClick.AddListener(() => SelectCategory(category)); }
         for (int i = 0; i < 24; ++i) { _slots[i] = _panel.Find("Slot " + i).GetComponent<InventorySlot>(); _slots[i].Bind(this, i); }
         SetVisible(false);
@@ -48,6 +56,8 @@ public sealed class InventoryWindow : MonoBehaviour
     {
         if (_panel == null) return;
         _panel.gameObject.SetActive(open); DragSource = -1;
+        if (_equipment!=null) _equipment.SetActive(open);
+        if (open) { _panel.SetAsLastSibling(); _equipment?.transform.SetAsLastSibling(); }
         if (open && !Busy) RefreshFromServer();
         if (!open && EventSystem.current != null) EventSystem.current.SetSelectedGameObject(null);
     }
@@ -61,8 +71,11 @@ public sealed class InventoryWindow : MonoBehaviour
         // 저장 오류의 기본 응답은 기존 슬롯을 덮어쓰지 않고 재조회 전까지 조작을 막는다.
         if (data.Result != InventoryResult.StorageError && data.Result != InventoryResult.RateLimited &&
             Data != null && data.Revision < Data.Revision) return;
-        _recovery.Accept(data.Result, Time.unscaledTimeAsDouble); DragSource = -1;
-        if (!_recovery.RequiresRefresh) Data = data;
+        // 드롭·부활 snapshot은 슬롯을 갱신하되 진행 중인 다른 요청의 완료로 취급하지 않는다.
+        bool completes=data.RequestId!=0 && data.RequestId==_pendingRequestId;
+        if (completes || !Busy) _recovery.Accept(data.Result, Time.unscaledTimeAsDouble);
+        DragSource=-1;
+        if (data.Result!=InventoryResult.StorageError && data.Result!=InventoryResult.RateLimited) Data=data;
         _status.text = data.Result switch
         {
             InventoryResult.Success => "Drag items to move / merge. Double-click a potion to use.",
@@ -79,17 +92,24 @@ public sealed class InventoryWindow : MonoBehaviour
     public void Select(int index, bool use)
     {
         if (Busy || Data == null) return;
-        _selected = index; Refresh(); if (use) Request(InventoryOperation.Use, index, 0);
+        _selected = index; Refresh(); if (use) Request(Category==0 ? InventoryOperation.Equip : InventoryOperation.Use, index, 0);
     }
     public void BeginDrag(int index) { if (!Busy && !_recovery.RequiresRefresh && Data != null && Data.Entries[Category * 24 + index].ItemId != 0) { DragSource = index; _selected = index; Refresh(); } }
     public void EndDrag() { DragSource = -1; }
+    private void Unequip(int slot)
+    {
+        if (Data==null) return;
+        for (int target=0;target<24;++target) if (Data.Entries[target].ItemId==0) { Request(InventoryOperation.Unequip,slot,target,0); return; }
+        _status.text="No free equipment inventory slot.";
+    }
     public void Drop(int target) { if (DragSource >= 0 && target != DragSource) { int source = DragSource; DragSource = -1; Request(InventoryOperation.Move, source, target); } }
-    private void Request(InventoryOperation operation, int source, int target)
+    private void Request(InventoryOperation operation, int source, int target, int category=-1)
     {
         if (source < 0 || source >= 24 || target < 0 || target >= 24 || !_recovery.Begin(operation, Time.unscaledTimeAsDouble)) return;
         // 요청 중에는 추가 조작을 막고 서버 응답에서만 표시 상태를 갱신한다.
         _status.text = "Updating inventory..."; Refresh();
-        if (Requested != null) Requested(operation, (byte)Category, (byte)source, (byte)target);
+        _pendingRequestId=++_nextRequestId;
+        if (Requested != null) Requested(operation, (byte)(category<0 ? Category : category), (byte)source, (byte)target,_pendingRequestId);
         else Fail("Connect or start Offline preview first.");
     }
     private void Refresh()
@@ -106,7 +126,16 @@ public sealed class InventoryWindow : MonoBehaviour
         _vitals.text = Data == null ? "Loading character inventory..." : $"HP  {Data.Hp} / {Data.MaxHp}       MP  {Data.Mp} / {Data.MaxMp}";
         uint item = Data != null && _selected >= 0 ? Data.Entries[Category * 24 + _selected].ItemId : 0;
         _description.text = ItemCatalog.Name(item) + "\n" + ItemCatalog.Description(item);
-        _use.interactable = !Busy && !_recovery.RequiresRefresh && Category == 1 && (item == 101 || item == 102);
+        if (Category==0 && item!=0) _description.text += "\nInstance: "+Data.Entries[_selected].InstanceId;
+        bool canEquip=!Busy && !_recovery.RequiresRefresh && Data!=null && Data.Hp>0;
+        _equip.interactable=canEquip && Category==0 && (item==1 || item==2);
+        for (int i=0;i<2;++i)
+        {
+            var entry=Data==null ? default : Data.Equipped[i];
+            _equippedLabels[i].text=(i==0 ? "WEAPON" : "HAT")+"\n"+(entry.ItemId==0 ? "Not equipped" : ItemCatalog.Name(entry.ItemId));
+            _unequip[i].interactable=canEquip && entry.ItemId!=0;
+        }
+        _use.interactable = !Busy && !_recovery.RequiresRefresh && Data != null && Data.Hp > 0 && Category == 1 && (item == 101 || item == 102);
         _sort.interactable = !Busy && !_recovery.RequiresRefresh && Data != null;
         if (_retry != null) _retry.interactable = !Busy;
     }
@@ -150,6 +179,25 @@ public sealed class InventoryWindow : MonoBehaviour
         var panel = root.transform.Find("Inventory Panel");
         if (panel != null && panel.Find("Retry") == null)
             ButtonAt(panel, "Retry", new(16, 405, 95, 28), "REFRESH", new Color(0.78f, 0.86f, 0.96f));
+        if (panel!=null && panel.Find("Equip")==null) ButtonAt(panel,"Equip",new(122,405,105,28),"EQUIP",Accent);
+        if (root.transform.Find("Equipment Panel")==null)
+        {
+            var equipment=Node(root.transform,"Equipment Panel",new(445,105,175,230),Paper);
+            Label(equipment,"Title",new(12,6,150,25),"EQUIPMENT",15,FontStyle.Bold);
+            for (int i=0;i<2;++i)
+            {
+                Label(equipment,"Item "+i,new(12,37+i*94,150,46),"Not equipped",12);
+                ButtonAt(equipment,"Remove "+i,new(12,84+i*94,150,28),"UNEQUIP",Accent);
+            }
+        }
+    }
+    public bool ApplyVitals(VitalsData vitals)
+    {
+        // 생명력만 받은 경우 슬롯이 중간에 바뀌지 않았음을 변경 번호로 확인한다.
+        if (Data==null || _recovery.RequiresRefresh) { RefreshFromServer(); return false; }
+        if (vitals.Revision<Data.Revision) return false;
+        if (vitals.Revision>Data.Revision+1) { RefreshFromServer(); return false; }
+        Data.Hp=vitals.Hp; Data.MaxHp=vitals.MaxHp; Data.Mp=vitals.Mp; Data.MaxMp=vitals.MaxMp; Data.Revision=vitals.Revision; Refresh(); return true;
     }
     private static RectTransform Node(Transform parent, string name, Rect rect, Color color)
     {

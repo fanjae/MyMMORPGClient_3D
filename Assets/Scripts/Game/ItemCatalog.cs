@@ -27,7 +27,7 @@ public static class ItemCatalog
     public static InventoryData Preview()
     {
         InventoryData data = new() { Revision = 1, Mesos = 1250, Hp = 50, MaxHp = 100, Mp = 25, MaxMp = 60 };
-        data.Entries[0] = new() { ItemId = 1, Quantity = 1 }; data.Entries[1] = new() { ItemId = 2, Quantity = 1 };
+        data.Entries[0] = new() { ItemId = 1, Quantity = 1, InstanceId = 1 }; data.Entries[1] = new() { ItemId = 2, Quantity = 1, InstanceId = 2 };
         data.Entries[24] = new() { ItemId = 101, Quantity = 10 }; data.Entries[25] = new() { ItemId = 102, Quantity = 8 };
         data.Entries[28] = new() { ItemId = 101, Quantity = 5 }; data.Entries[48] = new() { ItemId = 201, Quantity = 1 };
         data.Entries[72] = new() { ItemId = 301, Quantity = 25 }; data.Entries[73] = new() { ItemId = 302, Quantity = 12 };

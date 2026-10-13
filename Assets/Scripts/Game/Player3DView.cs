@@ -12,10 +12,18 @@ public sealed class Player3DView : MonoBehaviour
     private float _yaw;
     private Transform _weapon;
     private double _attackUntil;
+    private TextMesh _damage;
+    private Material _bodyMaterial;
+    private Color _bodyColor;
+    private double _hurtUntil;
+    private bool _dead;
+    private bool _combatPaused;
+    private Camera _camera;
     private readonly List<Material> _materials = new();
     public void Initialize(uint id, World3DData world, bool local)
     {
         CharacterId = id; Local = local;
+        _camera=Camera.main;
         GameObject capsule = GameObject.CreatePrimitive(PrimitiveType.Capsule);
         capsule.name = "Body"; capsule.transform.SetParent(transform, false);
         capsule.transform.localPosition = new Vector3(0, world.Height * 0.025f, 0);
@@ -23,6 +31,7 @@ public sealed class Player3DView : MonoBehaviour
         Destroy(capsule.GetComponent<Collider>());
         var material = CreateMaterial(local ? Color.cyan : Color.HSVToRGB((id * 0.618034f) % 1, 0.7f, 0.95f));
         _materials.Add(material);
+        _bodyMaterial=material; _bodyColor=material.color;
         capsule.GetComponent<Renderer>().material = material;
         GameObject face = GameObject.CreatePrimitive(PrimitiveType.Cube);
         face.name = "Facing"; face.transform.SetParent(transform, false);
@@ -37,6 +46,8 @@ public sealed class Player3DView : MonoBehaviour
         Destroy(sword.GetComponent<Collider>()); _weapon = sword.transform; _weapon.localPosition = new(0.65f, 0.85f, 0.5f); _weapon.localScale = new(0.12f, 0.85f, 0.12f);
         var swordMaterial = CreateMaterial(new(1, 0.8f, 0.3f)); _materials.Add(swordMaterial); sword.GetComponent<Renderer>().sharedMaterial = swordMaterial;
         sword.SetActive(false);
+        _damage=new GameObject("Damage").AddComponent<TextMesh>(); _damage.transform.SetParent(transform,false); _damage.transform.localPosition=new(0,2.1f,0);
+        _damage.characterSize=0.1f; _damage.fontSize=36; _damage.anchor=TextAnchor.MiddleCenter; _damage.color=new(1,0.3f,0.3f); _damage.text="";
         SetLocal(new Motion3DSimulation(world).Spawn());
     }
     public void ConfigureRemote(World3DData world, Relay3DAction snapshot, double now)
@@ -51,15 +62,34 @@ public sealed class Player3DView : MonoBehaviour
         transform.position = Position(state); transform.rotation = Quaternion.Euler(0, state.Yaw / 100f, 0);
     }
     public void PlayAttack() { _attackUntil = Time.unscaledTimeAsDouble + 0.24; _weapon.gameObject.SetActive(true); }
+    public void StopAttack() { if (_weapon!=null) _weapon.gameObject.SetActive(false); }
+    public void PauseCombat(bool paused) { _combatPaused = paused; if (paused) StopAttack(); }
+    public void SetVitals(ushort hp,ushort damage)
+    {
+        _dead=hp==0; if (_dead) StopAttack();
+        if (_dead && damage==0) _damage.text="Defeated";
+        if (damage>0) { _damage.text="-"+damage; _hurtUntil=Time.unscaledTimeAsDouble+0.7; }
+        _bodyMaterial.color=_dead ? Color.gray : damage>0 ? new Color(1,0.25f,0.25f) : _bodyColor;
+    }
     private void Update()
     {
+        if (_damage!=null)
+        {
+            if (_camera==null) _camera=Camera.main;
+            if (_camera!=null) _damage.transform.rotation=_camera.transform.rotation;
+            if (Time.unscaledTimeAsDouble>=_hurtUntil)
+            {
+                string text=_dead ? "Defeated" : ""; if (_damage.text!=text) _damage.text=text;
+                Color color=_dead ? Color.gray : _bodyColor; if (_bodyMaterial.color!=color) _bodyMaterial.color=color;
+            }
+        }
         if (_weapon != null && _weapon.gameObject.activeSelf)
         {
             float remaining = (float)(_attackUntil - Time.unscaledTimeAsDouble);
             if (remaining <= 0) _weapon.gameObject.SetActive(false);
             else _weapon.localRotation = Quaternion.Euler(0, Mathf.Lerp(70, -70, remaining / 0.24f), 55);
         }
-        if (Local || !_remote.Sample(Time.unscaledTimeAsDouble, out var state)) return;
+        if (Local || _dead || _combatPaused || !_remote.Sample(Time.unscaledTimeAsDouble, out var state)) return;
         _target = Position(state); _yaw = state.Yaw / 100f;
         LastGap = Vector3.Distance(transform.position, _target);
         // 계산 상태를 건드리지 않고 표시 위치만 보정한다. 큰 오차와 복귀는 즉시 맞춘다.

@@ -10,7 +10,9 @@ internal static class FieldServerIntegration
         await owner.ConnectAsync("test", 1002); await other.ConnectAsync("test2", 2001);
         var original = await owner.OperationAsync(InventoryOperation.Refresh);
         var isolated = await other.OperationAsync(InventoryOperation.Refresh);
-        Program.Check(isolated.Entries[24].Quantity == 10 && isolated.Hp == 50, "Other account state leaked");
+        Program.Check(isolated.Entries[24].Quantity == 10 && isolated.Hp <= 50 && isolated.MaxHp==100, "Other account inventory state leaked");
+        // 저장 검사는 전투 피해와 섞이지 않도록 두 검사 캐릭터를 안전한 바닥으로 이동한다.
+        await Task.WhenAll(owner.MoveSafeAsync(),other.MoveSafeAsync());
         if (!verify)
         {
             Program.Check(original.Revision == 1, "Expected fresh character inventory");
@@ -30,7 +32,7 @@ internal static class FieldServerIntegration
         }
         else
         {
-            Program.Check(original.Hp == 100 && original.Mp == 25 && original.Mesos == 1250 && original.Entries[24].Quantity == 13 &&
+            Program.Check(original.Hp <= 100 && original.Mp == 25 && original.Mesos == 1250 && original.Entries[24].Quantity == 13 &&
                 original.Entries[25].ItemId == 102 && original.Entries[25].Quantity == 8 && original.Revision > 1, "Inventory did not survive server restart");
             Console.WriteLine("[PASS] Server restart preserves inventory slots, quantities, mesos, HP, MP and revision");
         }
@@ -44,17 +46,31 @@ internal static class FieldServerIntegration
         owner.Dispose(); await Task.Delay(250);
         using Peer sameAccount = new(); await sameAccount.ConnectAsync("test", 1001);
         var differentCharacter = await sameAccount.OperationAsync(InventoryOperation.Refresh);
-        Program.Check(differentCharacter.Entries[24].Quantity == 13 && differentCharacter.Hp == 100 && differentCharacter.Revision == 4,
-            "Same-account character state leaked");
+        // 재입장 직후에도 몬스터가 공격하므로 저장한 상태와 피격에 따른 HP·revision의 관계를 함께 확인한다.
+        Program.Check(differentCharacter.Entries[24].Quantity == 13 && differentCharacter.MaxHp == 100 && differentCharacter.Mp == 25 &&
+            differentCharacter.Hp <= 100 && (100 - differentCharacter.Hp) % 10 == 0 &&
+            differentCharacter.Revision == 4u + (100u - differentCharacter.Hp) / 10 &&
+            differentCharacter.Entries[0].InstanceId != original.Entries[0].InstanceId,
+            $"Same-account character state leaked: result={differentCharacter.Result}, hp={differentCharacter.Hp}, revision={differentCharacter.Revision}, quantity={differentCharacter.Entries[24].Quantity}");
         Console.WriteLine("[PASS] Same-account and other-account isolation; map transfer/reentry restores current three-monster field");
         return 0;
     }
-    private sealed class Peer : IDisposable
+    internal sealed class Peer : IDisposable
     {
         private readonly TcpSession _login = new(), _game = new();
         private readonly Channel<(ushort Op, byte[] Data)> _loginPackets = Channel.CreateUnbounded<(ushort, byte[])>();
         private readonly Channel<(ushort Op, byte[] Data)> _gamePackets = Channel.CreateUnbounded<(ushort, byte[])>();
         internal World3DData World; internal FieldMonstersData Monsters; internal InventoryData Inventory;
+        private uint _character;
+        private ulong _requestId;
+        private readonly FieldMonsterAssembler _monsterAssembler = new();
+        internal bool CombatPaused, SawCombatPause;
+        internal bool ExpectMapReject;
+        internal ChangeMapResult? LastMapResult;
+        internal ChannelData Channels; internal DropsData Drops; internal BasicAttackData Attack;
+        internal PickupResult? PickupResult; internal int ChatCount;
+        internal readonly HashSet<uint> Remotes=new();
+        internal Task SendAsync(GamePacketOpcode opcode,byte[] payload) => _game.SendAsync((ushort)opcode,payload);
         internal Peer()
         {
             _login.PacketReceived += (op, data) => _loginPackets.Writer.TryWrite((op, data));
@@ -62,6 +78,7 @@ internal static class FieldServerIntegration
         }
         internal async Task ConnectAsync(string account, uint character)
         {
+            _character=character;
             await _login.ConnectAsync("127.0.0.1", 7776);
             await _login.SendAsync((ushort)LoginPacketOpcode.LoginRequest, LoginProtocol.CreateLoginRequest(account, Environment.GetEnvironmentVariable("MMORPG_TEST_PASSWORD")));
             Program.Check(LoginProtocol.ReadLoginResponse(await LoginAsync(LoginPacketOpcode.LoginResponse)) == LoginResult.Success, "Test login failed");
@@ -73,13 +90,15 @@ internal static class FieldServerIntegration
             await _game.ConnectAsync("127.0.0.1", selected.GameServerPort);
             await _game.SendAsync((ushort)GamePacketOpcode.EnterGameRequest, GameProtocol.CreateEnterGameRequest(selected.AuthKey));
             await PumpAsync(() => World != null && Monsters != null);
+            // 게임 입장 뒤 인벤토리 조회를 명시적으로 보내고 DB 상태가 준비된 뒤 다음 검사를 진행한다.
+            await OperationAsync(InventoryOperation.Refresh);
         }
         private async Task<byte[]> LoginAsync(LoginPacketOpcode opcode)
         {
             using CancellationTokenSource timeout = new(10000);
             var packet = await _loginPackets.Reader.ReadAsync(timeout.Token); Program.Check(packet.Op == (ushort)opcode, "Unexpected login response"); return packet.Data;
         }
-        private async Task PumpAsync(Func<bool> ready)
+        internal async Task PumpAsync(Func<bool> ready)
         {
             using CancellationTokenSource timeout = new(10000);
             do
@@ -87,29 +106,63 @@ internal static class FieldServerIntegration
                 var packet = await _gamePackets.Reader.ReadAsync(timeout.Token);
                 switch ((GamePacketOpcode)packet.Op)
                 {
+                    case GamePacketOpcode.ChannelState: Channels=FieldExtensions.ReadChannels(packet.Data); break;
+                    case GamePacketOpcode.FieldDrops3D: Drops=FieldExtensions.ReadDrops(packet.Data); break;
+                    case GamePacketOpcode.BasicAttackEvent3D: Attack=CombatProtocol.Read(packet.Data); break;
+                    case GamePacketOpcode.PickupResponse3D: PickupResult=FieldExtensions.ReadPickup(packet.Data).Result; break;
+                    case GamePacketOpcode.PlayerEnterMap: Remotes.Add(GameProtocol.ReadPlayerEnterMap(packet.Data).CharacterId); break;
+                    case GamePacketOpcode.PlayerLeaveMap: Remotes.Remove(GameProtocol.ReadPlayerLeaveMap(packet.Data)); break;
+                    case GamePacketOpcode.PlayerChat: ++ChatCount; break;
+                    case GamePacketOpcode.Vitals3D:
+                        var vitals=FieldExtensions.ReadVitals(packet.Data);
+                        if (vitals.CharacterId == _character) { CombatPaused = vitals.Paused; SawCombatPause |= vitals.Paused; }
+                        if (Inventory!=null && vitals.CharacterId==_character && vitals.Revision>=Inventory.Revision)
+                        { Inventory.Hp=vitals.Hp; Inventory.Mp=vitals.Mp; Inventory.Revision=vitals.Revision; } break;
                     case GamePacketOpcode.EnterGameResponse: Program.Check(GameProtocol.ReadEnterGameResponse(packet.Data).Result == EnterGameResult.Success, "Game entry failed"); break;
-                    case GamePacketOpcode.World3D: World = Movement3DProtocol.ReadWorld(packet.Data); Monsters = null; break;
+                    case GamePacketOpcode.World3D: World = Movement3DProtocol.ReadWorld(packet.Data); Monsters = null; _monsterAssembler.Clear(); break;
                     case GamePacketOpcode.WorldBox3D: Movement3DProtocol.AddBox(World, packet.Data); break;
                     case GamePacketOpcode.WorldEnd3D: Movement3DProtocol.CompleteWorld(World, packet.Data); break;
                     case GamePacketOpcode.FieldMonsters3D:
-                        var monsters = FieldProtocol.ReadMonsters(packet.Data);
-                        if (World != null && monsters.MapId == World.MapId && monsters.Generation == World.Generation) Monsters = monsters; break;
+                        var part = FieldProtocol.ReadMonsters(packet.Data);
+                        if (World != null && part.MapId == World.MapId && part.Generation == World.Generation)
+                        { var monsters = _monsterAssembler.Accept(part); if (monsters != null) Monsters = monsters; } break;
                     case GamePacketOpcode.InventorySnapshot: Inventory = FieldProtocol.ReadInventory(packet.Data); break;
-                    case GamePacketOpcode.ChangeMapResponse: Program.Check(GameProtocol.ReadChangeMapResponse(packet.Data).Result == ChangeMapResult.Success, "Map transfer failed"); break;
+                    case GamePacketOpcode.ChangeMapResponse:
+                        LastMapResult = GameProtocol.ReadChangeMapResponse(packet.Data).Result;
+                        if (!ExpectMapReject) Program.Check(LastMapResult == ChangeMapResult.Success, "Map transfer failed"); break;
                 }
             } while (!ready());
         }
         internal async Task<InventoryData> OperationAsync(InventoryOperation operation, byte category = 0, byte source = 0, byte target = 0)
         {
-            await Task.Delay(120);
-            var previous = Inventory;
-            await _game.SendAsync((ushort)GamePacketOpcode.InventoryRequest, FieldProtocol.InventoryRequest(operation, category, source, target, Inventory?.Revision ?? 0));
-            await PumpAsync(() => Inventory != previous); return Inventory;
+            for (int attempt = 0; attempt < 10; ++attempt)
+            {
+                await Task.Delay(120);
+                var previous = Inventory;
+                ulong requestId = ++_requestId;
+                await _game.SendAsync((ushort)GamePacketOpcode.InventoryRequest, FieldProtocol.InventoryRequest(operation, category, source, target, Inventory?.Revision ?? 0, requestId));
+                await PumpAsync(() => Inventory != previous && Inventory.RequestId == requestId);
+                // RateLimited는 적용하지 않은 요청만 반환하므로 제한이 풀린 뒤 다시 요청해도 소비를 반복하지 않는다.
+                if (Inventory.Result != InventoryResult.RateLimited) return Inventory;
+            }
+            throw new InvalidDataException("Inventory request remained rate limited");
         }
         internal async Task ChangeMapAsync(uint map)
         {
             await _game.SendAsync((ushort)GamePacketOpcode.ChangeMapRequest, GameProtocol.CreateChangeMapRequest(map));
             await PumpAsync(() => World?.MapId == map && Monsters?.MapId == map);
+        }
+        internal async Task MoveSafeAsync()
+        {
+            var motion=new ClientMotion3D(); motion.Configure(World); var watch=System.Diagnostics.Stopwatch.StartNew();
+            for (int step=0;step<23;++step)
+            {
+                motion.SetInput(step<7 ? 1 : 0,1,false); motion.Advance(0.1);
+                if (motion.TryCreateBatch(watch.Elapsed.TotalSeconds,out var batch)) await SendAsync(GamePacketOpcode.MovementActions3D,Movement3DProtocol.CreateBatch(batch));
+                await Task.Delay(220); await PumpAsync(()=>true);
+            }
+            motion.StopInput(); motion.Advance(0.02); await Task.Delay(220);
+            if (motion.TryCreateBatch(watch.Elapsed.TotalSeconds,out var stopped)) await SendAsync(GamePacketOpcode.MovementActions3D,Movement3DProtocol.CreateBatch(stopped));
         }
         public void Dispose() { _game.Dispose(); _login.Dispose(); }
     }

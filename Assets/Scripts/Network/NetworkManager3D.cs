@@ -38,6 +38,13 @@ public sealed class NetworkManager3D : MonoBehaviour
     public event Action<InventoryData> InventoryReceived;
     public event Action<FieldMonstersData> FieldMonstersReceived;
     public event Action<BasicAttackData> AttackReceived;
+    public event Action<ChannelData> ChannelsReceived;
+    public event Action<VitalsData> VitalsReceived;
+    public event Action<DropsData> DropsReceived;
+    public event Action<ulong,PickupResult> PickupReceived;
+    private readonly FieldMonsterAssembler _monsterAssembler = new();
+    private uint _activeFieldMap;
+    private ulong _activeFieldGeneration;
     public event Action<ChangeMapData> MapChanged;
     public event Action LoginDisconnected;
     public event Action GameDisconnected;
@@ -99,6 +106,7 @@ public sealed class NetworkManager3D : MonoBehaviour
         TcpSession session = new();
         _gameSession = session;
         _pendingGeometry = null;
+        _monsterAssembler.Clear(); _activeFieldMap = 0; _activeFieldGeneration = 0;
         session.PacketReceived += (opcode, payload) => OnGamePacketReceived(session, opcode, payload);
         session.Disconnected += () => _disconnectQueue.Enqueue(() => DisconnectSession(session, true));
 
@@ -129,13 +137,20 @@ public sealed class NetworkManager3D : MonoBehaviour
     }
 
     // 현재 화면의 변경 번호를 함께 보내 서버가 오래된 슬롯 조작을 거절할 수 있도록 한다.
-    public Task SendInventoryAsync(InventoryOperation operation, byte category, byte source, byte target, ulong revision)
+    public Task SendInventoryAsync(InventoryOperation operation, byte category, byte source, byte target, ulong revision, ulong requestId)
     {
-        return _gameSession.SendAsync((ushort)GamePacketOpcode.InventoryRequest, FieldProtocol.InventoryRequest(operation, category, source, target, revision));
+        return _gameSession.SendAsync((ushort)GamePacketOpcode.InventoryRequest, FieldProtocol.InventoryRequest(operation, category, source, target, revision,requestId));
     }
 
     public Task SendAttackAsync(uint map, ulong generation, ulong sequence, ulong actionSequence) =>
         _gameSession.SendAsync((ushort)GamePacketOpcode.BasicAttackRequest3D, CombatProtocol.Request(map, generation, sequence, actionSequence));
+    public Task RequestChannelsAsync() => _gameSession.SendAsync((ushort)GamePacketOpcode.ChannelListRequest,Array.Empty<byte>());
+    public Task ChangeChannelAsync(ushort channel)
+    { using PacketWriter writer=new(); writer.Write(channel); return _gameSession.SendAsync((ushort)GamePacketOpcode.ChangeChannelRequest,writer.ToArray()); }
+    public Task ReviveAsync() => _gameSession.SendAsync((ushort)GamePacketOpcode.ReviveRequest,Array.Empty<byte>());
+    public Task PickupAsync(uint map,ulong generation,ulong sequence,ulong drop) => _gameSession.SendAsync((ushort)GamePacketOpcode.PickupRequest3D,FieldExtensions.Pickup(map,generation,sequence,drop));
+    public Task PickupStatusAsync(ulong drop)
+    { using PacketWriter writer = new(); writer.Write(drop); return _gameSession.SendAsync((ushort)GamePacketOpcode.PickupStatusRequest3D, writer.ToArray()); }
 
     public Task SendChatAsync(string message)
     {
@@ -183,6 +198,10 @@ public sealed class NetworkManager3D : MonoBehaviour
 
             switch ((GamePacketOpcode)opcode)
             {
+                case GamePacketOpcode.ChannelState: ChannelsReceived?.Invoke(FieldExtensions.ReadChannels(payload)); break;
+                case GamePacketOpcode.Vitals3D: VitalsReceived?.Invoke(FieldExtensions.ReadVitals(payload)); break;
+                case GamePacketOpcode.FieldDrops3D: DropsReceived?.Invoke(FieldExtensions.ReadDrops(payload)); break;
+                case GamePacketOpcode.PickupResponse3D: var pickup=FieldExtensions.ReadPickup(payload); PickupReceived?.Invoke(pickup.Id,pickup.Result); break;
                 case GamePacketOpcode.EnterGameResponse:
                     EnterGameReceived?.Invoke(GameProtocol.ReadEnterGameResponse(payload));
                     break;
@@ -206,10 +225,12 @@ public sealed class NetworkManager3D : MonoBehaviour
                 case GamePacketOpcode.MapInfo:
                     _mapBounds = GameProtocol.ReadMapInfo(payload);
                     _pendingGeometry = null;
+                    _monsterAssembler.Clear(); _activeFieldMap = 0; _activeFieldGeneration = 0;
                     MapInfoReceived?.Invoke(_mapBounds);
                     break;
 
                 case GamePacketOpcode.World3D:
+                    _monsterAssembler.Clear();
                     _pendingGeometry = Movement3DProtocol.ReadWorld(payload);
                     if (_pendingGeometry.MapId != _mapBounds.MapId)
                         throw new System.IO.InvalidDataException("3D world without matching MapInfo");
@@ -219,6 +240,7 @@ public sealed class NetworkManager3D : MonoBehaviour
                     break;
                 case GamePacketOpcode.WorldEnd3D:
                     Movement3DProtocol.CompleteWorld(_pendingGeometry, payload);
+                    _activeFieldMap = _pendingGeometry.MapId; _activeFieldGeneration = _pendingGeometry.Generation;
                     GeometryReceived?.Invoke(_pendingGeometry);
                     _pendingGeometry = null;
                     break;
@@ -252,7 +274,10 @@ public sealed class NetworkManager3D : MonoBehaviour
                 case GamePacketOpcode.BasicAttackEvent3D:
                     AttackReceived?.Invoke(CombatProtocol.Read(payload)); break;
                 case GamePacketOpcode.FieldMonsters3D:
-                    FieldMonstersReceived?.Invoke(FieldProtocol.ReadMonsters(payload));
+                    var part = FieldProtocol.ReadMonsters(payload);
+                    if (part.MapId != _activeFieldMap || part.Generation != _activeFieldGeneration) break;
+                    var monsters = _monsterAssembler.Accept(part);
+                    if (monsters != null) FieldMonstersReceived?.Invoke(monsters);
                     break;
             }
         });

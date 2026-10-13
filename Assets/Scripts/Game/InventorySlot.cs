@@ -26,5 +26,10 @@ public sealed class InventorySlot : MonoBehaviour, IPointerClickHandler, IBeginD
     // 슬롯 자체는 움직이지 않고 드래그 출발·도착 번호만 InventoryWindow에서 관리한다.
     public void OnDrag(PointerEventData eventData) { }
     public void OnEndDrag(PointerEventData eventData) => _owner.EndDrag();
-    public void OnDrop(PointerEventData eventData) { if (eventData.pointerDrag != null && eventData.pointerDrag.GetComponent<InventorySlot>() != null) _owner.Drop(_index); }
+    public void OnDrop(PointerEventData eventData)
+    {
+        // 다른 Canvas나 다른 인벤토리 창의 드래그를 현재 캐릭터의 요청으로 사용하지 않는다.
+        if (eventData.pointerDrag!=null && eventData.pointerDrag.TryGetComponent<InventorySlot>(out var source) && source._owner==_owner && source._index!=_index)
+            _owner.Drop(_index);
+    }
 }

@@ -7,7 +7,19 @@ public static class InventoryPreview
     {
         data.Result = InventoryResult.Success;
         int offset = category * 24;
-        if (operation == InventoryOperation.Move)
+        if (operation == InventoryOperation.Equip)
+        {
+            var item=data.Entries[source]; int slot=item.ItemId==1 ? 0 : item.ItemId==2 ? 1 : -1;
+            if (category!=0 || slot<0 || data.Hp==0) { data.Result=InventoryResult.CannotUse; return; }
+            data.Entries[source]=data.Equipped[slot]; data.Equipped[slot]=item;
+        }
+        else if (operation == InventoryOperation.Unequip)
+        {
+            if (category!=0 || source>=2 || data.Equipped[source].ItemId==0 || data.Hp==0) { data.Result=InventoryResult.CannotUse; return; }
+            if (data.Entries[target].ItemId!=0) { data.Result=InventoryResult.Full; return; }
+            data.Entries[target]=data.Equipped[source]; data.Equipped[source]=default;
+        }
+        else if (operation == InventoryOperation.Move)
         {
             var from = data.Entries[offset + source]; var to = data.Entries[offset + target];
             if (source == target || from.ItemId == 0) { data.Result = InventoryResult.InvalidSlot; return; }
@@ -37,7 +49,7 @@ public static class InventoryPreview
         else if (operation == InventoryOperation.Use)
         {
             var item = data.Entries[offset + source];
-            if (category != 1 || item.Quantity == 0 || !((item.ItemId == 101 && data.Hp < data.MaxHp) || (item.ItemId == 102 && data.Mp < data.MaxMp)))
+            if (category != 1 || data.Hp==0 || item.Quantity == 0 || !((item.ItemId == 101 && data.Hp < data.MaxHp) || (item.ItemId == 102 && data.Mp < data.MaxMp)))
             { data.Result = InventoryResult.CannotUse; return; }
             if (item.ItemId == 101) data.Hp = (ushort)Math.Min(data.MaxHp, data.Hp + 30); else data.Mp = (ushort)Math.Min(data.MaxMp, data.Mp + 20);
             --item.Quantity; data.Entries[offset + source] = item.Quantity == 0 ? default : item;

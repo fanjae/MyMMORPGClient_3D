@@ -16,6 +16,7 @@ public sealed class Monster3DView : MonoBehaviour
     private static int _instances;
     private static readonly Material[] BodyMaterials = new Material[3];
     private static Material _eyes;
+    public static int SharedMaterialCount => (BodyMaterials[0]!=null ? 1 : 0)+(BodyMaterials[1]!=null ? 1 : 0)+(BodyMaterials[2]!=null ? 1 : 0)+(_eyes!=null ? 1 : 0);
     private static readonly Color[] Colors = { new(0.41f, 0.83f, 0.28f), new(0.37f, 0.72f, 0.93f), new(0.98f, 0.64f, 0.35f) };
 
     public void Initialize(uint id, byte kind)

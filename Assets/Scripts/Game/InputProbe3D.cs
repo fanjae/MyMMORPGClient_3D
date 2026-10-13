@@ -16,6 +16,9 @@ public sealed class InputProbe3D : MonoBehaviour
         public uint mapId; public ulong generation, inventoryRevision; public int remotePlayers, monsters;
         public bool remoteJump, remoteLand; public double firstMonsterX;
         public ushort hp, mp, redPotions, bluePotions; public ulong mesos;
+        public ushort channel=1, lastMonsterHp;
+        public int attackEvents, hits, kills, pickupEvents; public string pickupResult;
+        public ulong lastAttackSequence;
         public bool focused, inputAllowed, grounded, inventoryOpen, sceneTerrain;
         public double x, y, z; public ulong jumpId, tick; public string source = "Unity InputSystem and window key events; no scripted movement";
     }
@@ -32,6 +35,15 @@ public sealed class InputProbe3D : MonoBehaviour
         else if (key == KeyCode.I) ++_evidence.inventoryPresses;
         else ++_evidence.movePresses;
     }
+    public void RecordChannel(ushort channel) { if (_enabled) _evidence.channel=channel; }
+    public void RecordAttack(BasicAttackData data,bool local)
+    {
+        if (!_enabled || !local) return;
+        ++_evidence.attackEvents; _evidence.lastAttackSequence=data.Sequence; _evidence.lastMonsterHp=data.Hp;
+        if (data.Result==BasicAttackResult.Hit) ++_evidence.hits;
+        if (data.Result==BasicAttackResult.Killed) ++_evidence.kills;
+    }
+    public void RecordPickup(PickupResult result) { if (_enabled) { ++_evidence.pickupEvents; _evidence.pickupResult=result.ToString(); } }
     // 실제 입력 기록에 접속·인벤토리·상대 행동을 함께 남겨 자동 조작 결과와 구분한다.
     public void RecordField(World3DData world, InventoryData inventory, int remotes, int monsters, bool jump, bool land, double firstX, bool automatic)
     {

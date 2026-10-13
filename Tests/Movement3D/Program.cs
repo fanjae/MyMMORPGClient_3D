@@ -8,11 +8,14 @@ internal static class Program
     {
         try
         {
+            if (args.Length > 0 && args[0] == "--field-expansion") return await FieldExpansionIntegration.RunAsync(args.Length>1 && args[1]=="death");
+            if (args.Length > 0 && args[0] == "--field-recovery") return await FieldExpansionIntegration.RecoveryAsync(args[1]);
             if (args.Length > 0 && args[0] == "--field-server") return await FieldServerIntegration.RunAsync(args[1] == "verify");
             if (args.Length > 0 && args[0] == "--field-tcp") return await FieldIntegration.RunAsync(int.Parse(args[1]), args.Length > 2 ? int.Parse(args[2]) : 0, args.Length > 3 ? int.Parse(args[3]) : 0);
             if (args.Length > 0 && args[0] == "--tcp") return await TcpAsync(int.Parse(args[1]), int.Parse(args[2]), int.Parse(args[3]));
             FieldHardeningTests.Run();
             CombatTests.Run();
+            FieldExpansionTests.Run();
             void Run(string name, Action test) { test(); Console.WriteLine("[PASS] " + name); }
             Run("XYZ ground motion preserves diagonal speed and wall collision", () =>
             {
@@ -84,7 +87,7 @@ internal static class Program
                 byte[] payload = writer.ToArray(); Check(payload.Length == 118 && Movement3DProtocol.ReadBroadcast(payload).Actions.Count == 1, "3D broadcast layout changed");
                 payload[^1] = 255; bool rejected = false;
                 try { Movement3DProtocol.ReadBroadcast(payload); } catch (InvalidDataException) { rejected = true; }
-                Check(rejected && GameProtocol.ProtocolVersion == 9, "Invalid flags accepted or 3D version wrong");
+                Check(rejected && GameProtocol.ProtocolVersion == 11, "Invalid flags accepted or 3D version wrong");
             });
             Run("Remote silence stops prediction and fresh events resume without sequence replay", () =>
             {
@@ -100,7 +103,7 @@ internal static class Program
                 Check(anchor.Z == 40 && remote.Snap, "Silence recovery replayed the stale timeline instead of snapping to a fresh baseline");
                 remote.Sample(4.3, out var resumed); Check(resumed.Z > 40, "Remote did not resume at fresh state");
             });
-            Console.WriteLine("PASS 14 3D client test groups"); return 0;
+            Console.WriteLine("PASS 18 3D client test groups"); return 0;
         }
         catch (Exception e) { Console.Error.WriteLine("[FAIL] " + e); return 1; }
     }
@@ -207,6 +210,7 @@ internal static class Program
                 // 몬스터가 없는 이동 전용 Map에서도 빈 목록과 현재 입장 번호를 검증한다.
                 case GamePacketOpcode.FieldMonsters3D:
                     var monsters = FieldProtocol.ReadMonsters(packet.Payload); Check(monsters.MapId == World.MapId && monsters.Generation == World.Generation, "Wrong monster snapshot generation"); break;
+                case GamePacketOpcode.FieldDrops3D: FieldExtensions.ReadDrops(packet.Payload); break;
                 default: throw new InvalidDataException("Unexpected 3D fixture opcode " + packet.Opcode);
             }
         }
