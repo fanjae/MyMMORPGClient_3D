@@ -12,6 +12,10 @@ public sealed class NetworkManager3D : MonoBehaviour
     private TcpSession _loginSession;
     private TcpSession _gameSession;
     private World3DData _pendingGeometry;
+    public bool MeasureFieldReceive { get; set; }
+    public long FieldParts { get; private set; }
+    public double FieldReceiveMilliseconds { get; private set; }
+    public double FieldApplyMilliseconds { get; private set; }
     private MapInfoData _mapBounds;
 
     public TcpSession.TrafficSnapshot GameTraffic => _gameSession?.GetTraffic() ?? default;
@@ -274,10 +278,14 @@ public sealed class NetworkManager3D : MonoBehaviour
                 case GamePacketOpcode.BasicAttackEvent3D:
                     AttackReceived?.Invoke(CombatProtocol.Read(payload)); break;
                 case GamePacketOpcode.FieldMonsters3D:
+                    long receiveStart=MeasureFieldReceive ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
                     var part = FieldProtocol.ReadMonsters(payload);
                     if (part.MapId != _activeFieldMap || part.Generation != _activeFieldGeneration) break;
                     var monsters = _monsterAssembler.Accept(part);
+                    long applyStart=MeasureFieldReceive ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
+                    if(MeasureFieldReceive) { ++FieldParts; FieldReceiveMilliseconds+=(applyStart-receiveStart)*1000.0/System.Diagnostics.Stopwatch.Frequency; }
                     if (monsters != null) FieldMonstersReceived?.Invoke(monsters);
+                    if(MeasureFieldReceive) FieldApplyMilliseconds+=(System.Diagnostics.Stopwatch.GetTimestamp()-applyStart)*1000.0/System.Diagnostics.Stopwatch.Frequency;
                     break;
             }
         });

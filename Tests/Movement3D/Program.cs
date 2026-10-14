@@ -8,6 +8,8 @@ internal static class Program
     {
         try
         {
+            if (args.Length > 0 && args[0] == "--fault-proxy") return await FieldFaultProxy.RunAsync(int.Parse(args[1]),args[2]);
+            if (args.Length > 0 && args[0] == "--field-load") return await FieldLoadIntegration.RunAsync(int.Parse(args[1]),args[2]);
             if (args.Length > 0 && args[0] == "--field-expansion") return await FieldExpansionIntegration.RunAsync(args.Length>1 && args[1]=="death");
             if (args.Length > 0 && args[0] == "--field-recovery") return await FieldExpansionIntegration.RecoveryAsync(args[1]);
             if (args.Length > 0 && args[0] == "--field-server") return await FieldServerIntegration.RunAsync(args[1] == "verify");

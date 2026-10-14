@@ -11,6 +11,8 @@
     <Compile Include="FieldServerIntegration.cs" />
     <Compile Include="FieldExpansionIntegration.cs" />
     <Compile Include="FieldExpansionTests.cs" />
+    <Compile Include="FieldFaultProxy.cs" />
+    <Compile Include="FieldLoadIntegration.cs" />
     <Compile Include="../../Assets/Scripts/Game/GameplayInput3D.cs" />
     <Compile Include="../../Assets/Scripts/Game/InventoryRecovery3D.cs" />
     <Compile Include="../../Assets/Scripts/Game/PickupRecovery3D.cs" />

@@ -69,6 +69,7 @@ internal static class FieldServerIntegration
         internal ChangeMapResult? LastMapResult;
         internal ChannelData Channels; internal DropsData Drops; internal BasicAttackData Attack;
         internal PickupResult? PickupResult; internal int ChatCount;
+        internal TcpSession.TrafficSnapshot Traffic(ushort? opcode=null) => _game.GetTraffic(opcode);
         internal readonly HashSet<uint> Remotes=new();
         internal Task SendAsync(GamePacketOpcode opcode,byte[] payload) => _game.SendAsync((ushort)opcode,payload);
         internal Peer()
@@ -87,7 +88,8 @@ internal static class FieldServerIntegration
             await _login.SendAsync((ushort)LoginPacketOpcode.CharacterSelectRequest, LoginProtocol.CreateCharacterSelectRequest(character));
             var selected = LoginProtocol.ReadCharacterSelectResponse(await LoginAsync(LoginPacketOpcode.CharacterSelectResponse));
             Program.Check(selected.Result == CharacterSelectResult.Success, "Test selection failed");
-            await _game.ConnectAsync("127.0.0.1", selected.GameServerPort);
+            int port=int.TryParse(Environment.GetEnvironmentVariable("MMORPG_TEST_GAME_PORT"),out int proxyPort) ? proxyPort : selected.GameServerPort;
+            await _game.ConnectAsync("127.0.0.1", port);
             await _game.SendAsync((ushort)GamePacketOpcode.EnterGameRequest, GameProtocol.CreateEnterGameRequest(selected.AuthKey));
             await PumpAsync(() => World != null && Monsters != null);
             // 게임 입장 뒤 인벤토리 조회를 명시적으로 보내고 DB 상태가 준비된 뒤 다음 검사를 진행한다.
@@ -104,6 +106,15 @@ internal static class FieldServerIntegration
             do
             {
                 var packet = await _gamePackets.Reader.ReadAsync(timeout.Token);
+                Handle(packet);
+            } while (!ready());
+        }
+        internal void Drain()
+        {
+            while (_gamePackets.Reader.TryRead(out var packet)) Handle(packet);
+        }
+        private void Handle((ushort Op,byte[] Data) packet)
+        {
                 switch ((GamePacketOpcode)packet.Op)
                 {
                     case GamePacketOpcode.ChannelState: Channels=FieldExtensions.ReadChannels(packet.Data); break;
@@ -131,7 +142,6 @@ internal static class FieldServerIntegration
                         LastMapResult = GameProtocol.ReadChangeMapResponse(packet.Data).Result;
                         if (!ExpectMapReject) Program.Check(LastMapResult == ChangeMapResult.Success, "Map transfer failed"); break;
                 }
-            } while (!ready());
         }
         internal async Task<InventoryData> OperationAsync(InventoryOperation operation, byte category = 0, byte source = 0, byte target = 0)
         {

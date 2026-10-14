@@ -14,6 +14,9 @@ public sealed class Monster3DView : MonoBehaviour
     private readonly MonsterMotion3D _motion = new();
     private bool _ownsMaterials;
     private static int _instances;
+    public static int LiveCount => _instances;
+    public static uint CreatedCount { get; private set; }
+    public static uint DestroyedCount { get; private set; }
     private static readonly Material[] BodyMaterials = new Material[3];
     private static Material _eyes;
     public static int SharedMaterialCount => (BodyMaterials[0]!=null ? 1 : 0)+(BodyMaterials[1]!=null ? 1 : 0)+(BodyMaterials[2]!=null ? 1 : 0)+(_eyes!=null ? 1 : 0);
@@ -21,7 +24,7 @@ public sealed class Monster3DView : MonoBehaviour
 
     public void Initialize(uint id, byte kind)
     {
-        Id = id; ++_instances; _ownsMaterials = true;
+        Id = id; ++_instances; ++CreatedCount; _ownsMaterials = true;
         // 같은 종류의 몸체와 눈 재질을 공유해 몬스터 수에 비례한 재질 생성을 줄인다.
         int color = kind % 3;
         if (BodyMaterials[color] == null) BodyMaterials[color] = Player3DView.CreateMaterial(Colors[color]);
@@ -60,6 +63,8 @@ public sealed class Monster3DView : MonoBehaviour
         RenderPose();
     }
     public void ShowDamage(ushort damage) { _damage.text = damage.ToString(); _damageUntil = Time.unscaledTimeAsDouble + 0.7; }
+    // 명시한 표시 부하 검사에서만 이름·피해 숫자의 렌더링 조건을 나누어 비교한다.
+    public void SetLoadPresentation(bool names,bool damage) { _label.gameObject.SetActive(names); _damage.gameObject.SetActive(damage); }
     private void RenderPose()
     {
         var pose = _motion.Sample(Time.unscaledTimeAsDouble);
@@ -79,7 +84,9 @@ public sealed class Monster3DView : MonoBehaviour
     }
     private void OnDestroy()
     {
-        if (!_ownsMaterials || --_instances != 0) return;
+        if (!_ownsMaterials) return;
+        ++DestroyedCount;
+        if (--_instances != 0) return;
         foreach (var material in BodyMaterials) if (material != null) Destroy(material);
         if (_eyes != null) Destroy(_eyes);
         for (int i = 0; i < BodyMaterials.Length; ++i) BodyMaterials[i] = null;
