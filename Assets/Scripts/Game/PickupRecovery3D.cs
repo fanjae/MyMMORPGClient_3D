@@ -12,6 +12,8 @@ public sealed class PickupRecovery3D
         if (!Pending || Queries >= 3 || now < _queryAt) return false;
         ++Queries; _queryAt = now + 5; return true;
     }
+    // 마지막 조회의 응답 제한까지 지난 경우 수동 조회 안내로 전환한다.
+    public bool NeedsManualQuery(double now) => Pending && Queries >= 3 && now >= _queryAt;
     public bool Accept(ulong dropId, PickupResult result)
     {
         if (DropId != dropId || !Pending) return false;

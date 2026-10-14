@@ -5,6 +5,7 @@ using System.Collections;
 using System.IO;
 using UnityEngine;
 using UnityEngine.InputSystem;
+using UnityEngine.InputSystem.UI;
 using UnityEngine.Rendering;
 
 public sealed class Client3DController : MonoBehaviour
@@ -26,11 +27,19 @@ public sealed class Client3DController : MonoBehaviour
     private ulong _combatRevision;
     private bool _windowPickup;
     private int _loadCount;
+    private int _onlineLoadCount;
+    private bool _onlineLoadStarted;
+    private string _loadDetail="all";
     private ushort _channelTarget;
     private bool _reviving;
     private bool TextFocused => _ui!=null && _ui.TextFocused;
     private readonly BasicAttack3D _attack = new();
     private bool _windowAttack;
+    private InputSystemUIInputModule[] _inputModules;
+    private bool _focusPending=true, _focusSettling;
+    private int _focusFrames;
+    public static bool UiInputAllowed { get; private set; }
+    private bool WindowInputAllowed => Application.isFocused && !_focusPending && !_focusSettling;
     private InputProbe3D _inputProbe;
     private readonly Dictionary<uint, Monster3DView> _monsters = new();
     private ulong _monsterTick;
@@ -66,7 +75,17 @@ public sealed class Client3DController : MonoBehaviour
     private bool _smoke, _smokeOnline, _smokeFinishing, _remoteJump, _remoteLand, _smokePeerReady;
     private bool _smokeFull, _smokeLogin, _smokeCharacters, _smokeTicket, _smokeEntered;
     private uint _smokeCharacterId;
+    private ushort _testGamePort;
     private double _smokeStarted;
+
+    [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.BeforeSceneLoad)]
+    private static void ConfigureWindowInput()
+    {
+        if (Application.platform!=RuntimePlatform.WindowsPlayer) return;
+        // Windows 포커스 콜백의 장치 리셋은 피하고 일반 Update에서 입력과 UI를 함께 정리한다.
+        Application.runInBackground=true;
+        InputSystem.settings.backgroundBehavior=InputSettings.BackgroundBehavior.IgnoreFocus;
+    }
 
     [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
     private static void Bootstrap()
@@ -78,6 +97,7 @@ public sealed class Client3DController : MonoBehaviour
     private void Awake()
     {
         Application.runInBackground = true; Application.targetFrameRate = 60;
+        _inputModules=FindObjectsByType<InputSystemUIInputModule>(FindObjectsSortMode.None);
         _network = GetComponent<NetworkManager3D>();
         _inventory = FindFirstObjectByType<InventoryWindow>();
         _inputProbe = GetComponent<InputProbe3D>();
@@ -133,16 +153,27 @@ public sealed class Client3DController : MonoBehaviour
     private async void Start()
     {
         var arguments = Environment.GetCommandLineArgs();
+        foreach(var argument in arguments)
+        {
+            if(argument.StartsWith("--field-load-detail=",StringComparison.Ordinal)) _loadDetail=argument.Substring("--field-load-detail=".Length);
+            if(argument.StartsWith("--field-online-load=",StringComparison.Ordinal))
+            { if(!int.TryParse(argument.Substring("--field-online-load=".Length),out _onlineLoadCount) || _onlineLoadCount<1 || _onlineLoadCount>128) { Application.Quit(1); return; } }
+        }
+        if(_loadDetail is not ("all" or "none" or "names" or "damage" or "attack")) { Application.Quit(1); return; }
+        _network.MeasureFieldReceive=_onlineLoadCount>0;
         foreach (var argument in arguments) if (argument.StartsWith("--field-load=",StringComparison.Ordinal))
         {
             if (!int.TryParse(argument.Substring("--field-load=".Length),out _loadCount) || (_loadCount!=3 && _loadCount!=32 && _loadCount!=128)) { Application.Quit(1); return; }
         }
-        if (_loadCount>0) { StartPreview(); gameObject.AddComponent<FieldLoadProbe>().Initialize(_loadCount); return; }
+        if (_loadCount>0) { StartPreview(); gameObject.AddComponent<FieldLoadProbe>().Initialize(_loadCount,_loadDetail); return; }
         _smokeFull = Array.Exists(arguments, arg => arg == "--smoke-full");
         _smoke = _smokeFull || Array.Exists(arguments, arg => arg == "--smoke-test" || arg == "--smoke-network");
         _smokeOnline = _smokeFull || Array.Exists(arguments, arg => arg == "--smoke-network");
         if (_smokeFull || Array.Exists(arguments, arg => arg == "--manual-full"))
         {
+            string proxyPort=Environment.GetEnvironmentVariable("MMORPG_TEST_GAME_PORT");
+            if (!string.IsNullOrEmpty(proxyPort) && (!ushort.TryParse(proxyPort,out _testGamePort) || _testGamePort==0))
+            { Debug.LogError("Invalid test proxy port."); Application.Quit(1); return; }
             // 전체 연결 검증 계정은 실행 인자가 아닌 해당 테스트 프로세스의 환경 변수로 전달한다.
             _login = Environment.GetEnvironmentVariable("MMORPG_TEST_LOGIN");
             _password = Environment.GetEnvironmentVariable("MMORPG_TEST_PASSWORD");
@@ -167,15 +198,20 @@ public sealed class Client3DController : MonoBehaviour
     }
     private void Update()
     {
+        UpdateWindowInput();
         Keyboard k = Keyboard.current;
-        if (_windowEscape || (k!=null && k.escapeKey.wasPressedThisFrame))
+        if (WindowInputAllowed && (_windowEscape || (k!=null && k.escapeKey.wasPressedThisFrame)))
         { _windowEscape=false; _ui?.ClearFocus(); _inventory?.SetVisible(false); _attack.Cancel(); _pickupMotion.Cancel(); _local?.StopAttack(); _ui?.ToggleMenu(); }
         if (_ui!=null && Time.unscaledTimeAsDouble>=_nextUiAt)
         { _nextUiAt=Time.unscaledTimeAsDouble+0.2; _ui.SetState(_status,_localId,_world?.MapId ?? 0,_channels?.Current ?? 1,_offline,_busy,_inventory?.Data,_characters); }
         if (_busy && Time.unscaledTimeAsDouble >= _deadline)
         { ++_attempt; _network.DisconnectAll(); _busy = false; _changingMap = false; _characters = Array.Empty<CharacterInfo>(); _status = "Server response timed out."; }
         if (!_motion.Ready || _local == null || _failed) return;
+        if(_onlineLoadCount>0 && !_onlineLoadStarted && _monsters.Count>0 && _inventory?.Data!=null)
+        { _onlineLoadStarted=true; gameObject.AddComponent<FieldLoadProbe>().Initialize(_onlineLoadCount,_loadDetail,_network); }
         if (!_offline && _pickupRecovery.TryQuery(Time.unscaledTimeAsDouble)) QueryPickup();
+        if (!_offline && _pickupRecovery.NeedsManualQuery(Time.unscaledTimeAsDouble))
+            _status="Pickup result pending. LOOT [Z] retries the result query.";
         // 오프라인 미리보기에서만 순찰을 직접 계산하고 온라인은 서버 상태를 사용한다.
         if (_offline)
             foreach (var monster in _monsters.Values)
@@ -186,7 +222,7 @@ public sealed class Client3DController : MonoBehaviour
                 state.Yaw = (ushort)(Math.Cos((Time.unscaledTimeAsDouble - _smokeStarted) * 0.55 + state.Id) > 0 ? 9000 : 27000); monster.Apply(state);
             }
         // 사망·복구 중에도 인벤토리 개폐는 허용하고 캐릭터 조작만 중단한다.
-        if ((_windowInventory || (k != null && k.iKey.wasPressedThisFrame)) && !TextFocused && _ui?.MenuOpen!=true && _inventory != null)
+        if (WindowInputAllowed && (_windowInventory || (k != null && k.iKey.wasPressedThisFrame)) && !TextFocused && _ui?.MenuOpen!=true && _inventory != null)
         { _inventory.SetVisible(!_inventory.IsOpen); }
         _windowInventory = false;
         if (_inventory?.Data?.Hp==0 || _combatPaused)
@@ -198,7 +234,7 @@ public sealed class Client3DController : MonoBehaviour
             return;
         }
         // 채팅·인벤토리·Map 변경·창 비활성화 중에는 캐릭터 조작을 멈춘다.
-        bool allowed = Application.isFocused && !TextFocused && _ui?.MenuOpen!=true && !_changingMap && k != null && (_inventory == null || !_inventory.IsOpen);
+        bool allowed = WindowInputAllowed && !TextFocused && _ui?.MenuOpen!=true && !_changingMap && k != null && (_inventory == null || !_inventory.IsOpen);
         int held = ReadHeldInput(k);
         int active = _inputGate.Filter(allowed, held);
         if (allowed && _inputGate.CanPress(GameplayInput3D.Attack) && (_windowAttack || k.jKey.wasPressedThisFrame || k.leftCtrlKey.wasPressedThisFrame)) RequestAttack();
@@ -264,9 +300,9 @@ public sealed class Client3DController : MonoBehaviour
         try
         {
             await _network.SendMovementActionsAsync(batch);
-            if (attack && ReferenceEquals(_world, world))
+            if (attack && ReferenceEquals(_world, world) && _attack.CanSend(attackSequence) && CanAttackInput())
                 await _network.SendAttackAsync(world.MapId, world.Generation, attackSequence, actionSequence);
-            if (pickup && ReferenceEquals(_world,world))
+            if (pickup && ReferenceEquals(_world,world) && _pickupMotion.CanSend(pickupSequence) && CanAttackInput())
             {
                 // 전송 이후 결과를 잃어도 재접속에서 조회할 수 있도록 요청한 드롭 번호만 보관한다.
                 _pickupRecovery.Begin(dropId, Time.unscaledTimeAsDouble);
@@ -278,7 +314,40 @@ public sealed class Client3DController : MonoBehaviour
         finally { if (ReferenceEquals(_world, world)) _sending = false; }
     }
     // 포커스를 잃으면 눌린 키와 대기 입력을 비워 복귀 후 이동·점프가 남지 않도록 한다.
-    private void OnApplicationFocus(bool focused) { if (!focused) { _attack.Cancel(); _pickupMotion.Cancel(); _local?.StopAttack(); _inputGate.Reset(); ClearWindowInput(); _windowButtons.Clear(); _motion.StopInput(); } }
+    private void OnApplicationFocus(bool focused)
+    {
+        _focusPending=true; UiInputAllowed=false;
+        if (!focused) { _attack.Cancel(); _pickupMotion.Cancel(); _inputGate.Reset(); ClearWindowInput(); _windowButtons.Clear(); _motion.StopInput(); }
+    }
+    private void UpdateWindowInput()
+    {
+        if (_focusPending)
+        {
+            _focusPending=false; _local?.StopAttack();
+            if (Application.platform==RuntimePlatform.WindowsPlayer)
+            {
+                foreach(var module in _inputModules) if(module!=null) module.enabled=false;
+                if(Application.isFocused)
+                {
+                    // 동기화 이벤트가 다음 입력 갱신에서 반영될 때까지 이미 눌린 키를 새 입력으로 쓰지 않는다.
+                    foreach(var device in new InputDevice[] { Keyboard.current, Mouse.current }) if(device!=null)
+                    { if(!device.enabled) InputSystem.EnableDevice(device); if(!InputSystem.TrySyncDevice(device)) InputSystem.ResetDevice(device); }
+                    _focusFrames=2;
+                }
+                else
+                {
+                    foreach(var device in new InputDevice[] { Keyboard.current, Mouse.current }) if(device!=null) InputSystem.ResetDevice(device);
+                    _focusFrames=0;
+                }
+                _inputGate.Reset();
+            }
+        }
+        _focusSettling=_focusFrames>0;
+        if(_focusSettling) { --_focusFrames; _inputGate.Reset(); }
+        if(Application.platform==RuntimePlatform.WindowsPlayer)
+            foreach(var module in _inputModules) if(module!=null && module.enabled!=(Application.isFocused && !_focusSettling)) module.enabled=Application.isFocused && !_focusSettling;
+        UiInputAllowed=WindowInputAllowed;
+    }
     private int ReadHeldInput(Keyboard k)
     {
         int held = 0;
@@ -299,7 +368,7 @@ public sealed class Client3DController : MonoBehaviour
     {
         // InputSystem에 상태가 잡히지 않는 키보드 입력은 실제 창 이벤트로 보완한다.
         // 일반 키보드 경로와 함께 사용하되 고정 이동 단계가 실행될 때까지 입력을 보존한다.
-        if (_smoke || !Application.isFocused) return;
+        if (_smoke || !WindowInputAllowed) return;
         if (input.type == EventType.KeyUp) { _windowKeys.Remove(input.keyCode); _windowButtons.Remove(input.keyCode); return; }
         if (input.type != EventType.KeyDown) return;
         // 채팅 입력 중에도 Esc는 포커스 해제로 처리하고 일반 문자는 게임 조작에 쓰지 않는다.
@@ -481,7 +550,8 @@ public sealed class Client3DController : MonoBehaviour
     {
         if (ticket.Result != CharacterSelectResult.Success) { _busy = false; _status = $"Select: {ticket.Result}"; return; }
         if (_smokeFull) { _smokeTicket = ticket.AuthKey != 0; Debug.Log("3D_FULL_TEST: CharacterSelect Success"); }
-        try { await _network.ConnectGameServerAsync(_connectedHost, ticket.GameServerPort, ticket.AuthKey); }
+        // 명시한 검증 실행에서만 응답 유실 프록시를 거치고 일반 접속은 서버가 안내한 포트를 사용한다.
+        try { await _network.ConnectGameServerAsync(_connectedHost, _testGamePort!=0 ? _testGamePort : ticket.GameServerPort, ticket.AuthKey); }
         catch (Exception e) { _busy = false; _status = e.Message; }
     }
     private async void ChangeMap()
@@ -521,10 +591,11 @@ public sealed class Client3DController : MonoBehaviour
         try { await _network.SendInventoryAsync(operation, category, source, target, _inventory.Data?.Revision ?? 0,requestId); }
         catch (Exception e) { if (attempt == _attempt) _inventory.Fail(e.Message); }
     }
+    private bool CanAttackInput() => !_combatPaused && WindowInputAllowed && !TextFocused && _ui?.MenuOpen!=true && _motion.Ready && !_changingMap && !_failed &&
+        (_inventory == null || !_inventory.IsOpen) && _inventory?.Data?.Hp > 0;
     private void RequestAttack()
     {
-        bool allowed = !_combatPaused && Application.isFocused && !TextFocused && _ui?.MenuOpen!=true && _motion.Ready && !_changingMap && !_failed &&
-            (_inventory == null || !_inventory.IsOpen) && _inventory?.Data?.Hp > 0;
+        bool allowed = CanAttackInput();
         if (!_attack.Queue(allowed, Time.unscaledTimeAsDouble, _motion)) return;
         // 검 표시는 입력 즉시 재생하고 실제 피해와 몬스터 HP는 서버 결과를 기다린다.
         _local.PlayAttack();
@@ -566,6 +637,7 @@ public sealed class Client3DController : MonoBehaviour
         // 이전 Map·재입장 번호·이미 반영한 tick의 몬스터 상태는 버린다.
         if (_world == null || data.MapId != _world.MapId || data.Generation != _world.Generation || (_hasMonsterTick && data.Tick <= _monsterTick)) return;
         _hasMonsterTick = true; _monsterTick = data.Tick; ++_monsterUpdates;
+        _inputProbe?.RecordMonsters(data);
         _presentMonsters.Clear(); _missingMonsters.Clear();
         foreach (var state in data.Monsters)
         {
@@ -602,6 +674,7 @@ public sealed class Client3DController : MonoBehaviour
         {
             if (data.Revision < _combatRevision) return;
             _combatRevision = data.Revision;
+            _inputProbe?.RecordCombat(data.Paused);
             if (_combatPaused != data.Paused)
             {
                 _combatPaused = data.Paused; _inputGate.Filter(false, ReadHeldInput(Keyboard.current)); ClearWindowInput(false); _motion.StopInput();
@@ -616,6 +689,7 @@ public sealed class Client3DController : MonoBehaviour
     {
         if (_world==null || data.MapId!=_world.MapId || data.Generation!=_world.Generation || data.Revision<=_dropRevision) return;
         _dropRevision=data.Revision; _presentDrops.Clear(); _missingDrops.Clear();
+        _inputProbe?.RecordDrops(data.Drops.Count);
         foreach (var drop in data.Drops)
         {
             _presentDrops.Add(drop.Id);
@@ -627,7 +701,7 @@ public sealed class Client3DController : MonoBehaviour
     }
     private void RequestPickup()
     {
-        if (_offline || _world==null || _busy || !Application.isFocused || TextFocused || _ui?.MenuOpen==true || _inventory?.IsOpen==true) return;
+        if (_offline || _world==null || _busy || !WindowInputAllowed || TextFocused || _ui?.MenuOpen==true || _inventory?.IsOpen==true) return;
         if (_pickupRecovery.Pending)
         {
             if (_pickupRecovery.Queries >= 3) _pickupRecovery.Restore(_pickupRecovery.DropId, Time.unscaledTimeAsDouble);
@@ -635,7 +709,7 @@ public sealed class Client3DController : MonoBehaviour
         }
         if (_combatPaused || _inventory?.Data?.Hp == 0) return;
         ulong id=0; double closest=40*40; var pose=_motion.State;
-        foreach (var entry in _drops) { var drop=entry.Value.State; double dx=drop.X-pose.X,dz=drop.Z-pose.Z,distance=dx*dx+dz*dz; if (distance<closest && Math.Abs(drop.Y-pose.Y)<=30) { id=entry.Key; closest=distance; } }
+        foreach (var entry in _drops) { var drop=entry.Value.State; double dx=drop.X-pose.X,dz=drop.Z-pose.Z,distance=dx*dx+dz*dz; if (distance<=closest && Math.Abs(drop.Y-pose.Y)<=30) { id=entry.Key; closest=distance; } }
         if (id==0) { _status="No item nearby."; return; }
         if (_pickupMotion.Queue(true,Time.unscaledTimeAsDouble,_motion)) _pendingPickupId=id;
     }

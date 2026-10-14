@@ -1,7 +1,7 @@
 // 이동 확인이 포함된 묶음의 송신이 끝난 뒤에만 기본 공격 요청을 보낸다.
 public sealed class BasicAttack3D
 {
-    private ulong _checkpoint, _sequence;
+    private ulong _checkpoint, _sequence, _canceledThrough;
     private double _nextAt;
     public bool Queue(bool allowed, double now, ClientMotion3D motion)
     {
@@ -17,5 +17,7 @@ public sealed class BasicAttack3D
         return false;
     }
     // Map 전환·채팅·창 비활성화에서는 대기 공격만 취소하고 요청 순서는 유지한다.
-    public void Cancel() { _checkpoint = 0; }
+    public void Cancel() { _checkpoint = 0; _canceledThrough = _sequence; }
+    // 이동 송신을 기다리는 사이 취소된 공격도 새 입력과 구분해 전송하지 않는다.
+    public bool CanSend(ulong sequence) => sequence > _canceledThrough && sequence <= _sequence;
 }

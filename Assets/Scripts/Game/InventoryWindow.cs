@@ -3,6 +3,9 @@ using UnityEngine;
 using UnityEngine.UI;
 using UnityEngine.EventSystems;
 using UnityEngine.InputSystem.UI;
+using UnityEngine.InputSystem;
+using UnityEngine.InputSystem.LowLevel;
+using System.Collections.Generic;
 
 // 편집기에서 SampleScene에 저장한 Canvas·탭·슬롯을 연결해 인벤토리를 표시한다.
 public sealed class InventoryWindow : MonoBehaviour
@@ -25,6 +28,12 @@ public sealed class InventoryWindow : MonoBehaviour
     private readonly Text[] _equippedLabels=new Text[2];
     private readonly Button[] _unequip=new Button[2];
     private int _selected = -1;
+    private bool _mouseHeld;
+    private int _mouseSource = -1, _mouseCategory, _rawDragFrame = -1;
+    private Vector2 _mousePosition, _mouseStart;
+    private InventoryEntry _mouseEntry;
+    private readonly List<RaycastResult> _mouseHits = new();
+    public bool HandledMouseDrag => _rawDragFrame == Time.frameCount;
     private static readonly Color Ink = new(0.18f, 0.25f, 0.34f), Paper = new(1f, 0.98f, 0.91f), Accent = new(1f, 0.57f, 0.19f);
 
     private void Awake()
@@ -44,6 +53,55 @@ public sealed class InventoryWindow : MonoBehaviour
         for (int i = 0; i < 5; ++i) { int category = i; _tabs[i] = _panel.Find("Tab " + i).GetComponent<Button>(); _tabs[i].onClick.AddListener(() => SelectCategory(category)); }
         for (int i = 0; i < 24; ++i) { _slots[i] = _panel.Find("Slot " + i).GetComponent<InventorySlot>(); _slots[i].Bind(this, i); }
         SetVisible(false);
+        InputSystem.onEvent += ReadMouseEvent;
+    }
+    private void OnDestroy() { InputSystem.onEvent -= ReadMouseEvent; }
+    private void OnApplicationFocus(bool focused)
+    {
+        // 다른 창으로 전환한 드래그는 복귀 후 해제 입력으로 적용하지 않는다.
+        if (!focused) { _mouseHeld=false; _mouseSource=-1; DragSource=-1; }
+    }
+    private int MouseSlot(Vector2 position)
+    {
+        if (EventSystem.current == null) return -1;
+        var pointer = new PointerEventData(EventSystem.current) { position = position };
+        _mouseHits.Clear(); EventSystem.current.RaycastAll(pointer, _mouseHits);
+        if (_mouseHits.Count == 0) return -1;
+        var slot = _mouseHits[0].gameObject.GetComponentInParent<InventorySlot>();
+        for (int i=0;i<_slots.Length;++i) if (_slots[i]==slot) return i;
+        return -1;
+    }
+    private void ReadMouseEvent(InputEventPtr input, InputDevice device)
+    {
+        if (device is not Mouse mouse || (!input.IsA<StateEvent>() && !input.IsA<DeltaStateEvent>())) return;
+        if (!IsOpen || !Client3DController.UiInputAllowed || EventSystem.current?.currentInputModule?.isActiveAndEnabled!=true) { _mouseHeld=false; _mouseSource=-1; return; }
+        if (mouse.position.ReadValueFromEvent(input,out Vector2 position)) _mousePosition=position;
+        if (!mouse.leftButton.ReadValueFromEvent(input,out float button)) return;
+        bool held=button>0.5f;
+        if (held && !_mouseHeld)
+        {
+            _mouseStart=_mousePosition; _mouseCategory=Category;
+            _mouseSource=!Busy && !_recovery.RequiresRefresh && Data!=null ? MouseSlot(_mousePosition) : -1;
+            if (_mouseSource>=0) _mouseEntry=Data.Entries[Category*24+_mouseSource];
+        }
+        else if (!held && _mouseHeld && _mouseSource>=0)
+        {
+            int source=_mouseSource, target=MouseSlot(_mousePosition);
+            int threshold=EventSystem.current?.pixelDragThreshold ?? 5;
+            // 같은 프레임에 끝난 드래그도 실제 누름·해제 위치로 복원해 UI의 마지막 위치에 합쳐지지 않도록 한다.
+            if (target>=0 && target!=source && (_mousePosition-_mouseStart).sqrMagnitude>=threshold*threshold)
+            {
+                _rawDragFrame=Time.frameCount;
+                if(Category==_mouseCategory && Data!=null)
+                {
+                    var entry=Data.Entries[Category*24+source];
+                    if (entry.ItemId==_mouseEntry.ItemId && entry.Quantity==_mouseEntry.Quantity && entry.InstanceId==_mouseEntry.InstanceId)
+                    { BeginDrag(source); Drop(target); }
+                }
+            }
+            _mouseSource=-1;
+        }
+        _mouseHeld=held;
     }
     private void Update()
     {
@@ -56,6 +114,7 @@ public sealed class InventoryWindow : MonoBehaviour
     {
         if (_panel == null) return;
         _panel.gameObject.SetActive(open); DragSource = -1;
+        _mouseSource=-1; _mouseHeld=open && Mouse.current?.leftButton.isPressed==true;
         if (_equipment!=null) _equipment.SetActive(open);
         if (open) { _panel.SetAsLastSibling(); _equipment?.transform.SetAsLastSibling(); }
         if (open && !Busy) RefreshFromServer();
@@ -82,7 +141,8 @@ public sealed class InventoryWindow : MonoBehaviour
             InventoryResult.StaleRevision => "Inventory refreshed. Try again.",
             InventoryResult.CannotUse => "This item cannot be used, or HP / MP is already full.",
             InventoryResult.StorageError => "Inventory storage unavailable. Please try again.",
-            InventoryResult.RateLimited => "Please wait a moment before the next action.", _ => "Choose a valid item and slot."
+            InventoryResult.RateLimited => "Please wait a moment before the next action.",
+            InventoryResult.Full => "No free equipment inventory slot.", _ => "Choose a valid item and slot."
         };
         Refresh();
     }
@@ -105,6 +165,7 @@ public sealed class InventoryWindow : MonoBehaviour
     public void Drop(int target) { if (DragSource >= 0 && target != DragSource) { int source = DragSource; DragSource = -1; Request(InventoryOperation.Move, source, target); } }
     private void Request(InventoryOperation operation, int source, int target, int category=-1)
     {
+        if(operation!=InventoryOperation.Refresh && !Client3DController.UiInputAllowed) return;
         if (source < 0 || source >= 24 || target < 0 || target >= 24 || !_recovery.Begin(operation, Time.unscaledTimeAsDouble)) return;
         // 요청 중에는 추가 조작을 막고 서버 응답에서만 표시 상태를 갱신한다.
         _status.text = "Updating inventory..."; Refresh();

@@ -30,6 +30,7 @@ internal static class FieldExpansionTests
         Program.Check(!recovery.TryQuery(4.9) && recovery.TryQuery(5), "Lost pickup did not wait before querying");
         Program.Check(!recovery.Accept(99, PickupResult.Success) && !recovery.Accept(55, PickupResult.StorageError) && recovery.Pending, "Unrelated/error pickup cleared recovery");
         Program.Check(recovery.TryQuery(10) && recovery.TryQuery(15) && !recovery.TryQuery(20), "Pickup query retries were not bounded");
+        Program.Check(!recovery.NeedsManualQuery(19.9) && recovery.NeedsManualQuery(20), "Exhausted pickup queries did not expose manual retry after the last response deadline");
         recovery.Restore(55, 21); Program.Check(recovery.TryQuery(21) && recovery.Accept(55, PickupResult.NoRecord) && !recovery.Pending, "Reconnected pickup result did not resolve");
         Console.WriteLine("[PASS] Lost pickup uses bounded result queries, preserves ambiguous errors and resolves after reconnect");
     }
