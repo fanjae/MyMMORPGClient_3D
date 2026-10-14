@@ -46,7 +46,7 @@ public sealed class FieldUI : MonoBehaviour
         _menu.SetActive(false); _controls.SetActive(false); _chat.SetActive(false);
     }
     private static Button Bind(Transform parent,string name,Action action)
-    { var button=parent.Find(name).GetComponent<Button>(); button.onClick.AddListener(()=>action()); return button; }
+    { var button=parent.Find(name).GetComponent<Button>(); button.onClick.AddListener(()=> { if(Client3DController.UiInputAllowed) action(); }); return button; }
     public void ClearFocus() { if (EventSystem.current!=null) EventSystem.current.SetSelectedGameObject(null); }
     public void ToggleMenu()
     {
@@ -76,7 +76,7 @@ public sealed class FieldUI : MonoBehaviour
         foreach (var channel in data.Channels) SetText(_channels[channel.Id-1].GetComponentInChildren<Text>(),$"CH {channel.Id}\n{channel.Players} players");
     }
     public void ShowChat(string text) { SetText(_chatHistory,text); }
-    private void SendChat() { string text=_chatInput.text; if (string.IsNullOrWhiteSpace(text)) return; ChatRequested?.Invoke(text); _chatInput.text=""; ClearFocus(); }
+    private void SendChat() { if(!Client3DController.UiInputAllowed) return; string text=_chatInput.text; if (string.IsNullOrWhiteSpace(text)) return; ChatRequested?.Invoke(text); _chatInput.text=""; ClearFocus(); }
     private static void SetText(Text text,string value) { if (text.text!=value) text.text=value; }
     public static void EnsureLayout(GameObject canvas)
     {
