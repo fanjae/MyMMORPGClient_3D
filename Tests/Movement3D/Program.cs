@@ -8,8 +8,11 @@ internal static class Program
     {
         try
         {
+            if(args.Length>0 && args[0]=="--trade-server") return await TradeIntegration.RunAsync();
+            if(args.Length>0 && args[0]=="--trade-query-server") return await TradeIntegration.QueryAsync(ulong.Parse(args[1]));
+            if(args.Length>0 && args[0]=="--timing-server") return await TimingIntegration.RunAsync();
             if (args.Length > 0 && args[0] == "--fault-proxy") return await FieldFaultProxy.RunAsync(int.Parse(args[1]),args[2]);
-            if (args.Length > 0 && args[0] == "--field-load") return await FieldLoadIntegration.RunAsync(int.Parse(args[1]),args[2]);
+            if (args.Length > 0 && args[0] == "--field-load") return await FieldLoadIntegration.RunAsync(int.Parse(args[1]),args[2],args.Length>3?int.Parse(args[3]):12);
             if (args.Length > 0 && args[0] == "--field-expansion") return await FieldExpansionIntegration.RunAsync(args.Length>1 && args[1]=="death");
             if (args.Length > 0 && args[0] == "--field-recovery") return await FieldExpansionIntegration.RecoveryAsync(args[1]);
             if (args.Length > 0 && args[0] == "--field-server") return await FieldServerIntegration.RunAsync(args[1] == "verify");
@@ -18,6 +21,9 @@ internal static class Program
             FieldHardeningTests.Run();
             CombatTests.Run();
             FieldExpansionTests.Run();
+            AdaptiveTimingTests.Run();
+            TradeTests.Run();
+            WindowButtonTests.Run();
             void Run(string name, Action test) { test(); Console.WriteLine("[PASS] " + name); }
             Run("XYZ ground motion preserves diagonal speed and wall collision", () =>
             {
@@ -89,7 +95,7 @@ internal static class Program
                 byte[] payload = writer.ToArray(); Check(payload.Length == 118 && Movement3DProtocol.ReadBroadcast(payload).Actions.Count == 1, "3D broadcast layout changed");
                 payload[^1] = 255; bool rejected = false;
                 try { Movement3DProtocol.ReadBroadcast(payload); } catch (InvalidDataException) { rejected = true; }
-                Check(rejected && GameProtocol.ProtocolVersion == 11, "Invalid flags accepted or 3D version wrong");
+                Check(rejected && GameProtocol.ProtocolVersion == 12, "Invalid flags accepted or 3D version wrong");
             });
             Run("Remote silence stops prediction and fresh events resume without sequence replay", () =>
             {
@@ -105,7 +111,7 @@ internal static class Program
                 Check(anchor.Z == 40 && remote.Snap, "Silence recovery replayed the stale timeline instead of snapping to a fresh baseline");
                 remote.Sample(4.3, out var resumed); Check(resumed.Z > 40, "Remote did not resume at fresh state");
             });
-            Console.WriteLine("PASS 18 3D client test groups"); return 0;
+            Console.WriteLine("PASS 21 3D client test groups"); return 0;
         }
         catch (Exception e) { Console.Error.WriteLine("[FAIL] " + e); return 1; }
     }

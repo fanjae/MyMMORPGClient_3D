@@ -2,7 +2,7 @@ internal static class CombatTests
 {
     internal static void Run()
     {
-        Program.Check(CombatProtocol.Request(1, 2, 3, 4).Length == 28 && GameProtocol.ProtocolVersion == 11, "Attack request layout/version");
+        Program.Check(CombatProtocol.Request(1, 2, 3, 4).Length == 28 && GameProtocol.ProtocolVersion == 12, "Attack request layout/version");
         using PacketWriter writer = new(); writer.Write((uint)1); writer.Write((ulong)2); writer.Write((ulong)3); writer.Write((uint)1001);
         writer.Write((byte)BasicAttackResult.Hit); writer.Write((uint)1); writer.Write((ushort)40); writer.Write((ushort)60); writer.Write((ulong)2);
         writer.Write((ushort)20); writer.Write((ushort)0);

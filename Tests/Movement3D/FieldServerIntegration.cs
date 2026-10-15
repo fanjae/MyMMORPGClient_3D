@@ -68,6 +68,9 @@ internal static class FieldServerIntegration
         internal bool ExpectMapReject;
         internal ChangeMapResult? LastMapResult;
         internal ChannelData Channels; internal DropsData Drops; internal BasicAttackData Attack;
+        internal TradeStateData Trade;
+        internal ulong Pong;
+        internal bool Connected=>_game.IsConnected;
         internal PickupResult? PickupResult; internal int ChatCount;
         internal TcpSession.TrafficSnapshot Traffic(ushort? opcode=null) => _game.GetTraffic(opcode);
         internal readonly HashSet<uint> Remotes=new();
@@ -118,6 +121,8 @@ internal static class FieldServerIntegration
                 switch ((GamePacketOpcode)packet.Op)
                 {
                     case GamePacketOpcode.ChannelState: Channels=FieldExtensions.ReadChannels(packet.Data); break;
+                    case GamePacketOpcode.TradeState3D: Trade=TradeProtocol.Read(packet.Data); break;
+                    case GamePacketOpcode.TimingPong3D: Pong=new PacketReader(packet.Data,8).ReadUInt64(); break;
                     case GamePacketOpcode.FieldDrops3D: Drops=FieldExtensions.ReadDrops(packet.Data); break;
                     case GamePacketOpcode.BasicAttackEvent3D: Attack=CombatProtocol.Read(packet.Data); break;
                     case GamePacketOpcode.PickupResponse3D: PickupResult=FieldExtensions.ReadPickup(packet.Data).Result; break;
