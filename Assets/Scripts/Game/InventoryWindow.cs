@@ -28,6 +28,9 @@ public sealed class InventoryWindow : MonoBehaviour
     private readonly Text[] _equippedLabels=new Text[2];
     private readonly Button[] _unequip=new Button[2];
     private int _selected = -1;
+    public int SelectedSlot => _selected;
+    private bool _tradeLocked;
+    public void SetTradeLocked(bool locked) { if(_tradeLocked==locked) return; _tradeLocked=locked; Refresh(); }
     private bool _mouseHeld;
     private int _mouseSource = -1, _mouseCategory, _rawDragFrame = -1;
     private Vector2 _mousePosition, _mouseStart;
@@ -165,6 +168,7 @@ public sealed class InventoryWindow : MonoBehaviour
     public void Drop(int target) { if (DragSource >= 0 && target != DragSource) { int source = DragSource; DragSource = -1; Request(InventoryOperation.Move, source, target); } }
     private void Request(InventoryOperation operation, int source, int target, int category=-1)
     {
+        if(operation!=InventoryOperation.Refresh && _tradeLocked) { _status.text="Finish or cancel the trade before changing items."; return; }
         if(operation!=InventoryOperation.Refresh && !Client3DController.UiInputAllowed) return;
         if (source < 0 || source >= 24 || target < 0 || target >= 24 || !_recovery.Begin(operation, Time.unscaledTimeAsDouble)) return;
         // 요청 중에는 추가 조작을 막고 서버 응답에서만 표시 상태를 갱신한다.
@@ -188,7 +192,7 @@ public sealed class InventoryWindow : MonoBehaviour
         uint item = Data != null && _selected >= 0 ? Data.Entries[Category * 24 + _selected].ItemId : 0;
         _description.text = ItemCatalog.Name(item) + "\n" + ItemCatalog.Description(item);
         if (Category==0 && item!=0) _description.text += "\nInstance: "+Data.Entries[_selected].InstanceId;
-        bool canEquip=!Busy && !_recovery.RequiresRefresh && Data!=null && Data.Hp>0;
+        bool canEquip=!_tradeLocked && !Busy && !_recovery.RequiresRefresh && Data!=null && Data.Hp>0;
         _equip.interactable=canEquip && Category==0 && (item==1 || item==2);
         for (int i=0;i<2;++i)
         {
@@ -196,8 +200,8 @@ public sealed class InventoryWindow : MonoBehaviour
             _equippedLabels[i].text=(i==0 ? "WEAPON" : "HAT")+"\n"+(entry.ItemId==0 ? "Not equipped" : ItemCatalog.Name(entry.ItemId));
             _unequip[i].interactable=canEquip && entry.ItemId!=0;
         }
-        _use.interactable = !Busy && !_recovery.RequiresRefresh && Data != null && Data.Hp > 0 && Category == 1 && (item == 101 || item == 102);
-        _sort.interactable = !Busy && !_recovery.RequiresRefresh && Data != null;
+        _use.interactable = !_tradeLocked && !Busy && !_recovery.RequiresRefresh && Data != null && Data.Hp > 0 && Category == 1 && (item == 101 || item == 102);
+        _sort.interactable = !_tradeLocked && !Busy && !_recovery.RequiresRefresh && Data != null;
         if (_retry != null) _retry.interactable = !Busy;
     }
     // 실행 중 자동 생성 대신 편집기에서 배치하고 저장할 기본 UGUI 구성을 만든다.

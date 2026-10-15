@@ -127,7 +127,7 @@ public static class GameProtocol
 {
     public const int MaxPlayerNameLength = LoginProtocol.MaxCharacterNameLength;
     // 분할 목록과 전투 복구 상태를 사용하는 서버의 3D version 11과 맞춘다.
-    public const uint ProtocolVersion = 11;
+    public const uint ProtocolVersion = 12;
     public const int MaxChatMessageLength = 128;
     private const int PlayerDataSize = 4 + MaxPlayerNameLength + 2 + 4 + 4;
 

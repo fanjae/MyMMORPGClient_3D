@@ -29,6 +29,13 @@ public sealed class InputProbe3D : MonoBehaviour
         public bool focused, inputAllowed, uiInputAllowed, grounded, inventoryOpen, sceneTerrain;
         public double x, y, z; public ushort yaw; public ulong jumpId, tick; public string source = "Unity InputSystem and window key events; no scripted movement";
         public bool combatPaused; public int drops; public MonsterEvidence[] monsterStates;
+        public double rttMs, rttVariationMs, playbackBufferMs, arrivalJitterMs;
+    }
+    [Serializable] private sealed class TradeEvidence
+    {
+        public double time; public ulong id,revision,firstMesos,secondMesos;
+        public uint firstCharacter,secondCharacter; public string stage,result;
+        public bool firstConfirmed,secondConfirmed; public int firstItems,secondItems;
     }
     private readonly Evidence _evidence = new(); private bool _enabled; private double _writeAt;
     private string _lastEvent = "";
@@ -44,6 +51,20 @@ public sealed class InputProbe3D : MonoBehaviour
         else ++_evidence.movePresses;
     }
     public void RecordChannel(ushort channel) { if (_enabled) _evidence.channel=channel; }
+    public void RecordNetwork(NetworkTiming3D timing,double buffer,double jitter)
+    {
+        if(!_enabled) return;
+        _evidence.rttMs=timing.RttSeconds*1000; _evidence.rttVariationMs=timing.VariationSeconds*1000;
+        _evidence.playbackBufferMs=buffer*1000; _evidence.arrivalJitterMs=jitter*1000;
+    }
+    public void RecordTrade(TradeStateData state)
+    {
+        if(!_enabled) return;
+        File.AppendAllText("Logs/trade-events.jsonl",JsonUtility.ToJson(new TradeEvidence {
+            time=Time.unscaledTimeAsDouble,id=state.Id,revision=state.Revision,stage=state.Stage.ToString(),result=state.Result.ToString(),
+            firstCharacter=state.Characters[0],secondCharacter=state.Characters[1],firstConfirmed=state.Confirmed[0],secondConfirmed=state.Confirmed[1],
+            firstMesos=state.Offers[0].Mesos,secondMesos=state.Offers[1].Mesos,firstItems=state.Offers[0].Items.Count,secondItems=state.Offers[1].Items.Count })+"\n");
+    }
     public void RecordAttack(BasicAttackData data,bool local)
     {
         if (!_enabled) return;

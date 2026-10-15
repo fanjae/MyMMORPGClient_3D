@@ -71,6 +71,9 @@ public sealed class Player3DView : MonoBehaviour
         if (damage>0) { _damage.text="-"+damage; _hurtUntil=Time.unscaledTimeAsDouble+0.7; }
         _bodyMaterial.color=_dead ? Color.gray : damage>0 ? new Color(1,0.25f,0.25f) : _bodyColor;
     }
+    public void SetNetworkTiming(NetworkTiming3D timing) => _remote.SetNetworkTiming(timing);
+    public double PlaybackBufferSeconds=>_remote.PlaybackBufferSeconds;
+    public double ArrivalJitterSeconds=>_remote.ArrivalJitterSeconds;
     private void Update()
     {
         if (_damage!=null)

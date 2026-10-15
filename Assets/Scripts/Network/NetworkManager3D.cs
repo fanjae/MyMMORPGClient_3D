@@ -11,6 +11,14 @@ public sealed class NetworkManager3D : MonoBehaviour
 
     private TcpSession _loginSession;
     private TcpSession _gameSession;
+    public NetworkTiming3D Timing { get; } = new();
+    public double PlaybackBufferSeconds { get; set; } = 0.2;
+    private static double Clock => System.Diagnostics.Stopwatch.GetTimestamp() / (double)System.Diagnostics.Stopwatch.Frequency;
+    private async void SendTimingProbe(TcpSession session, ulong sequence)
+    {
+        try { using PacketWriter writer = new(); writer.Write(sequence); await session.SendAsync((ushort)GamePacketOpcode.TimingPing3D, writer.ToArray()); }
+        catch (Exception) { if (ReferenceEquals(_gameSession, session)) DisconnectSession(session, true); }
+    }
     private World3DData _pendingGeometry;
     public bool MeasureFieldReceive { get; set; }
     public long FieldParts { get; private set; }
@@ -46,6 +54,8 @@ public sealed class NetworkManager3D : MonoBehaviour
     public event Action<VitalsData> VitalsReceived;
     public event Action<DropsData> DropsReceived;
     public event Action<ulong,PickupResult> PickupReceived;
+    public event Action<TradeStateData> TradeReceived;
+    public Task SendTradeAsync(byte[] request) => _gameSession.SendAsync((ushort)GamePacketOpcode.TradeRequest3D,request);
     private readonly FieldMonsterAssembler _monsterAssembler = new();
     private uint _activeFieldMap;
     private ulong _activeFieldGeneration;
@@ -55,6 +65,7 @@ public sealed class NetworkManager3D : MonoBehaviour
 
     private void Update()
     {
+        if (_activeFieldGeneration != 0 && _gameSession != null && Timing.TryBegin(Clock, out ulong sequence)) SendTimingProbe(_gameSession, sequence);
         while (_disconnectQueue.TryDequeue(out Action disconnected))
             disconnected();
 
@@ -109,6 +120,7 @@ public sealed class NetworkManager3D : MonoBehaviour
         _gameSession?.Dispose();
         TcpSession session = new();
         _gameSession = session;
+        Timing.Reset();
         _pendingGeometry = null;
         _monsterAssembler.Clear(); _activeFieldMap = 0; _activeFieldGeneration = 0;
         session.PacketReceived += (opcode, payload) => OnGamePacketReceived(session, opcode, payload);
@@ -194,6 +206,7 @@ public sealed class NetworkManager3D : MonoBehaviour
 
     private void OnGamePacketReceived(TcpSession session, ushort opcode, byte[] payload)
     {
+        double receivedAt = Clock;
         // 게임 서버 패킷도 메인 스레드에서 역직렬화 후 이벤트로 전달
         EnqueuePacket(session, true, payload.Length + TcpSession.HeaderSize, () =>
         {
@@ -202,6 +215,11 @@ public sealed class NetworkManager3D : MonoBehaviour
 
             switch ((GamePacketOpcode)opcode)
             {
+                case GamePacketOpcode.TimingPong3D:
+                    if (payload.Length != 8) throw new System.IO.InvalidDataException("Invalid timing response.");
+                    Timing.Accept(new PacketReader(payload, 8).ReadUInt64(), receivedAt);
+                    break;
+                case GamePacketOpcode.TradeState3D: TradeReceived?.Invoke(TradeProtocol.Read(payload)); break;
                 case GamePacketOpcode.ChannelState: ChannelsReceived?.Invoke(FieldExtensions.ReadChannels(payload)); break;
                 case GamePacketOpcode.Vitals3D: VitalsReceived?.Invoke(FieldExtensions.ReadVitals(payload)); break;
                 case GamePacketOpcode.FieldDrops3D: DropsReceived?.Invoke(FieldExtensions.ReadDrops(payload)); break;
@@ -314,6 +332,7 @@ public sealed class NetworkManager3D : MonoBehaviour
         if (game && ReferenceEquals(_gameSession, session))
         {
             _gameSession = null;
+            Timing.Reset(); _activeFieldGeneration = 0;
             _pendingGeometry = null;
             session.Dispose();
             GameDisconnected?.Invoke();

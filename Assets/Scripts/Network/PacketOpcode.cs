@@ -38,5 +38,6 @@ public enum GamePacketOpcode : ushort
     InventoryRequest = 31, InventorySnapshot = 32, FieldMonsters3D = 33,
     BasicAttackRequest3D = 34, BasicAttackEvent3D = 35,
     ChannelListRequest = 36, ChannelState = 37, ChangeChannelRequest = 38,
-    Vitals3D = 39, ReviveRequest = 40, FieldDrops3D = 41, PickupRequest3D = 42, PickupResponse3D = 43, PickupStatusRequest3D = 44
+    Vitals3D = 39, ReviveRequest = 40, FieldDrops3D = 41, PickupRequest3D = 42, PickupResponse3D = 43, PickupStatusRequest3D = 44,
+    TimingPing3D = 45, TimingPong3D = 46, TradeRequest3D = 47, TradeState3D = 48
 }

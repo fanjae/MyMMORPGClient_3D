@@ -11,12 +11,16 @@ public sealed class RemoteMotion3D
     private double _referenceTick, _receivedAt;
     private short _inputX, _inputZ;
     private bool _hasRelay, _recovered;
+    private AdaptivePlayback3D _playback = new();
+    public double PlaybackBufferSeconds => _playback.BufferSeconds;
+    public double ArrivalJitterSeconds => _playback.ArrivalJitterSeconds;
+    public void SetNetworkTiming(NetworkTiming3D timing) => _playback.SetNetwork(timing.RttSeconds, timing.VariationSeconds, timing.Samples);
     public bool Ready => _simulation != null;
     public bool Snap { get; private set; }
     public Motion3DState State => _state;
     public void Configure(World3DData world, Relay3DAction snapshot, double now)
     {
-        _actions.Clear(); _simulation = new(world); _state = snapshot.Action.State;
+        _actions.Clear(); _playback = new(); _simulation = new(world); _state = snapshot.Action.State;
         _tick = _lastActionTick = snapshot.Action.ClientTick; _lastSequence = snapshot.Action.Sequence;
         _inputX = snapshot.Action.InputX; _inputZ = snapshot.Action.InputZ;
         _referenceTick = snapshot.LatestClientTick; _receivedAt = now; _hasRelay = true; _recovered = false;
@@ -25,13 +29,14 @@ public sealed class RemoteMotion3D
     {
         if (!Ready || relay.Action.Sequence <= _lastSequence || relay.Action.ClientTick < _lastActionTick) return false;
         _lastSequence = relay.Action.Sequence; _lastActionTick = relay.Action.ClientTick;
-        bool recovered = _hasRelay && now - _receivedAt >= MaxSilenceSeconds;
+        bool recovered = _hasRelay && now - _receivedAt >= PredictionWindow;
         if (recovered)
         {
             // 끊기기 전의 예측 tick을 따라잡느라 오래된 물리를 재생하지 않고 새 기준점으로 복구한다.
             _actions.Clear(); _tick = relay.Action.ClientTick; _referenceTick = relay.LatestClientTick; _recovered = true;
         }
         else _referenceTick = Math.Max(SourceTick(now), relay.LatestClientTick);
+        _playback.Receive(now, relay.LatestClientTick * Motion3DSimulation.FixedDelta);
         _receivedAt = now; _hasRelay = true;
         if (_actions.Count >= 128) throw new InvalidOperationException("Remote 3D action queue limit reached");
         _actions.Enqueue(relay.Action); return true;
@@ -40,7 +45,8 @@ public sealed class RemoteMotion3D
     {
         state = default; if (!Ready) return false;
         Snap = false;
-        double target = Math.Max(_tick, SourceTick(now) - BufferSeconds / Motion3DSimulation.FixedDelta);
+        _playback.Advance(now);
+        double target = Math.Max(_tick, SourceTick(now) - _playback.BufferSeconds / Motion3DSimulation.FixedDelta);
         int steps = 0;
         while (true)
         {
@@ -59,5 +65,7 @@ public sealed class RemoteMotion3D
         }
         state = _state; return true;
     }
-    private double SourceTick(double now) => _referenceTick + Math.Clamp(now - _receivedAt, 0, MaxSilenceSeconds) / Motion3DSimulation.FixedDelta;
+    // 정속 이동도 1초 확인 주기를 사용하므로 그 기한 이후의 예측만 100~200ms로 제한한다.
+    private double PredictionWindow => Math.Min(MaxSilenceSeconds, ClientMotion3D.CheckpointInterval + _playback.ExtraPredictionSeconds);
+    private double SourceTick(double now) => _referenceTick + Math.Clamp(now - _receivedAt, 0, PredictionWindow) / Motion3DSimulation.FixedDelta;
 }

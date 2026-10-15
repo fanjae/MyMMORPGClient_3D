@@ -12,6 +12,7 @@ public sealed class Client3DController : MonoBehaviour
 {
     private NetworkManager3D _network;
     private InventoryWindow _inventory;
+    private TradeWindow3D _trade;
     private FieldVitalsHUD _hud;
     private FieldUI _ui;
     private ChannelData _channels;
@@ -53,7 +54,7 @@ public sealed class Client3DController : MonoBehaviour
     private readonly HashSet<uint> _presentMonsters = new();
     private readonly List<uint> _missingMonsters = new();
     private readonly HashSet<KeyCode> _windowKeys = new();
-    private readonly HashSet<KeyCode> _windowButtons = new();
+    private readonly WindowButtonGate3D<KeyCode> _windowButtons = new();
     private bool _windowJump, _windowInventory, _windowEscape;
     private int _windowTapX, _windowTapZ;
     private readonly ClientMotion3D _motion = new();
@@ -103,6 +104,7 @@ public sealed class Client3DController : MonoBehaviour
         _inputProbe = GetComponent<InputProbe3D>();
         _hud = FindFirstObjectByType<FieldVitalsHUD>(FindObjectsInactive.Include);
         _ui=FindFirstObjectByType<FieldUI>(FindObjectsInactive.Include);
+        if(_ui!=null) { _trade=gameObject.AddComponent<TradeWindow3D>(); _trade.Initialize(_ui.GetComponentInParent<Canvas>().transform,_network,_inventory); }
         if (_ui!=null)
         {
             _ui.LoginRequested+=(host,port,account,password)=> { _host=host; _port=port; _login=account; _password=password; _ui.ClearFocus(); Login(); };
@@ -123,6 +125,7 @@ public sealed class Client3DController : MonoBehaviour
         };
         _network.VitalsReceived+=VitalsReceived; _network.DropsReceived+=DropsReceived;
         _network.PickupReceived += PickupReceived;
+        _network.TradeReceived += state=>_inputProbe?.RecordTrade(state);
         if (_hud != null) _hud.AttackRequested += RequestAttack;
         _network.AttackReceived += AttackReceived;
         if (_inventory != null) _inventory.Requested += InventoryRequested;
@@ -137,8 +140,8 @@ public sealed class Client3DController : MonoBehaviour
         _network.GeometryReceived += WorldReceived;
         _network.MovementReceived += SnapshotReceived;
         _network.MovementActionsReceived += ActionsReceived;
-        _network.PlayerEntered += data => { if (_world != null && data.CharacterId != _localId) CreateRemote(data.CharacterId); };
-        _network.PlayerLeft += id => { if (_players.Remove(id, out var player)) Destroy(player.gameObject); };
+        _network.PlayerEntered += data => { _trade?.SetPeer(data.CharacterId,data.Name); if (_world != null && data.CharacterId != _localId) CreateRemote(data.CharacterId); };
+        _network.PlayerLeft += id => { _trade?.RemovePeer(id); if (_players.Remove(id, out var player)) Destroy(player.gameObject); };
         _network.MapChanged += data =>
         {
             _changingMap = false; _busy = false; _status = $"Map change: {data.Result}";
@@ -199,6 +202,9 @@ public sealed class Client3DController : MonoBehaviour
     private void Update()
     {
         UpdateWindowInput();
+        double maxBuffer=0.2,maxJitter=0;
+        foreach (var player in _players.Values) { player.SetNetworkTiming(_network.Timing); maxBuffer=Math.Max(maxBuffer,player.PlaybackBufferSeconds); maxJitter=Math.Max(maxJitter,player.ArrivalJitterSeconds); }
+        _network.PlaybackBufferSeconds=maxBuffer; _inputProbe?.RecordNetwork(_network.Timing,maxBuffer,maxJitter);
         Keyboard k = Keyboard.current;
         if (WindowInputAllowed && (_windowEscape || (k!=null && k.escapeKey.wasPressedThisFrame)))
         { _windowEscape=false; _ui?.ClearFocus(); _inventory?.SetVisible(false); _attack.Cancel(); _pickupMotion.Cancel(); _local?.StopAttack(); _ui?.ToggleMenu(); }
@@ -234,7 +240,7 @@ public sealed class Client3DController : MonoBehaviour
             return;
         }
         // 채팅·인벤토리·Map 변경·창 비활성화 중에는 캐릭터 조작을 멈춘다.
-        bool allowed = WindowInputAllowed && !TextFocused && _ui?.MenuOpen!=true && !_changingMap && k != null && (_inventory == null || !_inventory.IsOpen);
+        bool allowed = WindowInputAllowed && !TextFocused && _trade?.IsOpen!=true && _trade?.Active!=true && _ui?.MenuOpen!=true && !_changingMap && k != null && (_inventory == null || !_inventory.IsOpen);
         int held = ReadHeldInput(k);
         int active = _inputGate.Filter(allowed, held);
         if (allowed && _inputGate.CanPress(GameplayInput3D.Attack) && (_windowAttack || k.jKey.wasPressedThisFrame || k.leftCtrlKey.wasPressedThisFrame)) RequestAttack();
@@ -378,7 +384,8 @@ public sealed class Client3DController : MonoBehaviour
         // 키 코드 없이 문자만 전달된 창 이벤트도 이동·점프·인벤토리 입력으로 읽는다.
         if (key == KeyCode.None)
             key = char.ToLowerInvariant(input.character) switch { 'w' => KeyCode.W, 'a' => KeyCode.A, 's' => KeyCode.S, 'd' => KeyCode.D, 'i' => KeyCode.I, 'j' => KeyCode.J, 'z' => KeyCode.Z, ' ' => KeyCode.Space, _ => KeyCode.None };
-        if (input.keyCode != KeyCode.None && (key == KeyCode.Space || key == KeyCode.I || key == KeyCode.Escape || key == KeyCode.J || key == KeyCode.LeftControl || key==KeyCode.Z) && !_windowButtons.Add(key))
+        bool deviceHeld=keyboard!=null && (key switch { KeyCode.Space=>keyboard.spaceKey.isPressed, KeyCode.I=>keyboard.iKey.isPressed, KeyCode.Escape=>keyboard.escapeKey.isPressed, KeyCode.J=>keyboard.jKey.isPressed, KeyCode.LeftControl=>keyboard.leftCtrlKey.isPressed, KeyCode.Z=>keyboard.zKey.isPressed, _=>false });
+        if ((key == KeyCode.Space || key == KeyCode.I || key == KeyCode.Escape || key == KeyCode.J || key == KeyCode.LeftControl || key==KeyCode.Z) && !_windowButtons.Press(key,input.keyCode!=KeyCode.None,deviceHeld))
         { input.Use(); return; } // 키를 누른 동안 발생하는 OS 반복 이벤트는 새 조작으로 처리하지 않는다.
         bool handled = true;
         // InputSystem에서 이미 읽은 버튼 입력은 창 이벤트에서 중복 처리하지 않는다.
@@ -411,6 +418,7 @@ public sealed class Client3DController : MonoBehaviour
         _busy = false; _characters = Array.Empty<CharacterInfo>();
         if (data.Result != EnterGameResult.Success) { _status = $"Enter: {data.Result}"; return; }
         _offline = false; _localId = data.CharacterId; _status = $"Entered as {data.Name} ({data.CharacterId}).";
+        _trade?.SetLocal(_localId,$"MMORPG.PendingTrade.{_connectedHost}.{_port}.{_localId}");
         _pickupKey = $"MMORPG.PendingPickup.{_connectedHost}.{_port}.{_localId}";
         _pickupRecovery.Clear();
         if (ulong.TryParse(PlayerPrefs.GetString(_pickupKey, ""), out ulong pendingDrop) && pendingDrop != 0)
@@ -485,6 +493,7 @@ public sealed class Client3DController : MonoBehaviour
     }
     private void Disconnected()
     {
+        _trade?.SetLocal(0);
         _pickupRecovery.Clear(); _pickupKey = null;
         ClearWorld(); _localId = 0; _offline = false; _busy = _changingMap = false;
         if (_inventory != null) _inventory.Clear();
@@ -492,6 +501,7 @@ public sealed class Client3DController : MonoBehaviour
     }
     private void ClearWorld()
     {
+        _trade?.ClearPeers();
         _world = null; _motion.Reset(); _tapX = _tapZ = 0; _sending = false; _failed = false;
         _attack.Cancel(); if (_hud != null) _hud.SetVisible(false);
         _pickupMotion.Cancel(); _pendingPickupId=_dropRevision=0;
@@ -591,7 +601,7 @@ public sealed class Client3DController : MonoBehaviour
         try { await _network.SendInventoryAsync(operation, category, source, target, _inventory.Data?.Revision ?? 0,requestId); }
         catch (Exception e) { if (attempt == _attempt) _inventory.Fail(e.Message); }
     }
-    private bool CanAttackInput() => !_combatPaused && WindowInputAllowed && !TextFocused && _ui?.MenuOpen!=true && _motion.Ready && !_changingMap && !_failed &&
+    private bool CanAttackInput() => !_combatPaused && WindowInputAllowed && !TextFocused && _trade?.IsOpen!=true && _trade?.Active!=true && _ui?.MenuOpen!=true && _motion.Ready && !_changingMap && !_failed &&
         (_inventory == null || !_inventory.IsOpen) && _inventory?.Data?.Hp > 0;
     private void RequestAttack()
     {
