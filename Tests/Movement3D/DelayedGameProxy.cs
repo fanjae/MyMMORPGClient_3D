@@ -8,12 +8,19 @@ internal sealed class DelayedGameProxy : IAsyncDisposable
     private readonly TcpListener _listener = new(IPAddress.Loopback, 0);
     private readonly CancellationTokenSource _stop = new();
     private readonly Stopwatch _clock = Stopwatch.StartNew();
-    private readonly int _delay, _jitter;
+    private int _delay, _jitter;
+    private readonly object _conditions=new();
+    internal volatile bool PauseDownload;
     private readonly int _targetPort;
     private readonly Task _relay;
     private TcpClient _front, _back;
     internal int Port => ((IPEndPoint)_listener.LocalEndpoint).Port;
     internal Task Completion => _relay;
+    internal void SetNetwork(int delay,int jitter)
+    {
+        if(delay<0 || jitter<0 || jitter>delay || delay>5000) throw new ArgumentOutOfRangeException(nameof(delay));
+        lock(_conditions) { _delay=delay; _jitter=jitter; }
+    }
 
     internal DelayedGameProxy(int delay, int jitter, int listenPort = 0, int targetPort = 7777)
     {
@@ -62,7 +69,6 @@ internal sealed class DelayedGameProxy : IAsyncDisposable
         {
             long lastDue = 0;
             int index = offset;
-            int[] jitter = { 0, _jitter, -_jitter, _jitter / 2, -_jitter / 2 };
             try
             {
                 while (!_stop.IsCancellationRequested)
@@ -75,7 +81,12 @@ internal sealed class DelayedGameProxy : IAsyncDisposable
                     byte[] bytes = new byte[length];
                     header.CopyTo(bytes, 0);
                     await source.ReadExactlyAsync(bytes.AsMemory(4), _stop.Token);
-                    long due = Math.Max(lastDue, _clock.ElapsedMilliseconds + Math.Max(0, _delay + jitter[index++ % jitter.Length]));
+                    long due;
+                    lock(_conditions)
+                    {
+                        int variation=(index++%5) switch { 1=>_jitter,2=>-_jitter,3=>_jitter/2,4=>-_jitter/2,_=>0 };
+                        due=Math.Max(lastDue,_clock.ElapsedMilliseconds+Math.Max(0,_delay+variation));
+                    }
                     lastDue = due;
                     await frames.Writer.WriteAsync((bytes, due), _stop.Token);
                 }
@@ -89,6 +100,7 @@ internal sealed class DelayedGameProxy : IAsyncDisposable
             {
                 int wait = (int)Math.Max(0, frame.Due - _clock.ElapsedMilliseconds);
                 if (wait > 0) await Task.Delay(wait, _stop.Token);
+                while(offset==2 && PauseDownload) await Task.Delay(10,_stop.Token);
                 await destination.WriteAsync(frame.Bytes, _stop.Token);
             }
         }

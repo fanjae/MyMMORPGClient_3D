@@ -8,7 +8,16 @@ internal static class Program
     {
         try
         {
+            if(args.Length>0 && args[0]=="--registration-server") return await RegistrationIntegration.RunAsync(args[1]);
             if(args.Length>0 && args[0]=="--trade-server") return await TradeIntegration.RunAsync();
+            if(args.Length>0 && args[0]=="--trade-loss-server") return await TradeFaultIntegration.RunAsync();
+            if(args.Length>0 && args[0]=="--trade-scenarios-server") return await TradeScenarioIntegration.RunAsync();
+            if(args.Length>0 && args[0]=="--trade-damage-server") return await TradeScenarioIntegration.DamageAsync();
+            if(args.Length>0 && args[0]=="--trade-disconnect-server") return await TradeDisconnectIntegration.RunAsync(args[1]);
+            if(args.Length>0 && args[0]=="--trade-recovery-server") return await TradeRecoveryIntegration.RunAsync(args[1],args.Length>2 && args[2]=="separate");
+            if(args.Length>0 && args[0]=="--movement-transitions-server") return await MovementTransitionIntegration.RunAsync(args[1]);
+            if(args.Length>0 && args[0]=="--field-visibility-server") return await FieldVisibilityIntegration.RunAsync();
+            if(args.Length>0 && args[0]=="--jump-boundary-server") return await JumpBoundaryIntegration.RunAsync();
             if(args.Length>0 && args[0]=="--trade-query-server") return await TradeIntegration.QueryAsync(ulong.Parse(args[1]));
             if(args.Length>0 && args[0]=="--timing-server") return await TimingIntegration.RunAsync();
             if (args.Length > 0 && args[0] == "--fault-proxy") return await FieldFaultProxy.RunAsync(int.Parse(args[1]),args[2]);
@@ -19,9 +28,12 @@ internal static class Program
             if (args.Length > 0 && args[0] == "--field-tcp") return await FieldIntegration.RunAsync(int.Parse(args[1]), args.Length > 2 ? int.Parse(args[2]) : 0, args.Length > 3 ? int.Parse(args[3]) : 0);
             if (args.Length > 0 && args[0] == "--tcp") return await TcpAsync(int.Parse(args[1]), int.Parse(args[2]), int.Parse(args[3]));
             FieldHardeningTests.Run();
+            RegistrationTests.Run();
             CombatTests.Run();
             FieldExpansionTests.Run();
             AdaptiveTimingTests.Run();
+            MotionTransitionTests.Run();
+            TradeStateTests.Run();
             TradeTests.Run();
             WindowButtonTests.Run();
             void Run(string name, Action test) { test(); Console.WriteLine("[PASS] " + name); }
@@ -111,7 +123,7 @@ internal static class Program
                 Check(anchor.Z == 40 && remote.Snap, "Silence recovery replayed the stale timeline instead of snapping to a fresh baseline");
                 remote.Sample(4.3, out var resumed); Check(resumed.Z > 40, "Remote did not resume at fresh state");
             });
-            Console.WriteLine("PASS 21 3D client test groups"); return 0;
+            Console.WriteLine("PASS 24 3D client test groups"); return 0;
         }
         catch (Exception e) { Console.Error.WriteLine("[FAIL] " + e); return 1; }
     }

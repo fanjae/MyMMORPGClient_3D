@@ -2,10 +2,23 @@
   <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net9.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings><EnableDefaultCompileItems>false</EnableDefaultCompileItems></PropertyGroup>
   <ItemGroup>
     <Compile Include="Program.cs" />
+    <Compile Include="RegistrationTests.cs" />
+    <Compile Include="RegistrationIntegration.cs" />
     <Compile Include="AdaptiveTimingTests.cs" />
+    <Compile Include="MotionTransitionTests.cs" />
+    <Compile Include="TradeStateTests.cs" />
+    <Compile Include="../../Assets/Scripts/Game/TradeStateGate3D.cs" />
     <Compile Include="TradeTests.cs" />
     <Compile Include="TradeIntegration.cs" />
+    <Compile Include="TradeFaultIntegration.cs" />
+    <Compile Include="TradeScenarioIntegration.cs" />
+    <Compile Include="TradeDisconnectIntegration.cs" />
+    <Compile Include="TradeRecoveryIntegration.cs" />
+    <Compile Include="TradeLossProxy.cs" />
     <Compile Include="TimingIntegration.cs" />
+    <Compile Include="MovementTransitionIntegration.cs" />
+    <Compile Include="FieldVisibilityIntegration.cs" />
+    <Compile Include="JumpBoundaryIntegration.cs" />
     <Compile Include="SlowPeerProxy.cs" />
     <Compile Include="WindowButtonTests.cs" />
     <Compile Include="../../Assets/Scripts/Game/WindowButtonGate3D.cs" />

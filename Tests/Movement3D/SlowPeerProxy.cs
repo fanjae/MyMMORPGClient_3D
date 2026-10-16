@@ -8,7 +8,10 @@ internal sealed class SlowPeerProxy : IAsyncDisposable
     private readonly TcpListener _listener=new(IPAddress.Loopback,0);
     private readonly CancellationTokenSource _stop=new();
     private readonly Task _relay; private TcpClient _front,_back;
+    private long _throttledBytes, _throttledFrames;
     public volatile bool Enabled;
+    public long ThrottledBytes=>Interlocked.Read(ref _throttledBytes);
+    public long ThrottledFrames=>Interlocked.Read(ref _throttledFrames);
     public int Port=>((IPEndPoint)_listener.LocalEndpoint).Port;
     public SlowPeerProxy() { _listener.Start(); _relay=Run(); }
     private async Task Run()
@@ -25,8 +28,10 @@ internal sealed class SlowPeerProxy : IAsyncDisposable
                     byte[] header=new byte[4]; await source.ReadExactlyAsync(header,_stop.Token);
                     int size=BinaryPrimitives.ReadUInt16LittleEndian(header); if(size<4 || size>4096) throw new InvalidDataException("Invalid slow proxy frame");
                     byte[] body=new byte[size-4]; await source.ReadExactlyAsync(body,_stop.Token);
-                    if(Enabled) await Task.Delay(TimeSpan.FromSeconds(Math.Max(0.02,size/1024.0)),_stop.Token);
+                    bool throttled=Enabled;
+                    if(throttled) await Task.Delay(TimeSpan.FromSeconds(Math.Max(0.02,size/1024.0)),_stop.Token);
                     await target.WriteAsync(header,_stop.Token); await target.WriteAsync(body,_stop.Token);
+                    if(throttled) { Interlocked.Add(ref _throttledBytes,size); Interlocked.Increment(ref _throttledFrames); }
                 }
             }
             var upload=_front.GetStream().CopyToAsync(_back.GetStream(),_stop.Token); var download=Download();

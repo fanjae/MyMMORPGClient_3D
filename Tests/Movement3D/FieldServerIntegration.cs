@@ -70,6 +70,8 @@ internal static class FieldServerIntegration
         internal ChannelData Channels; internal DropsData Drops; internal BasicAttackData Attack;
         internal TradeStateData Trade;
         internal ulong Pong;
+        internal Action<Relay3DAction> MovementReceived;
+        internal Action<Snapshot3DData> SnapshotReceived;
         internal bool Connected=>_game.IsConnected;
         internal PickupResult? PickupResult; internal int ChatCount;
         internal TcpSession.TrafficSnapshot Traffic(ushort? opcode=null) => _game.GetTraffic(opcode);
@@ -94,7 +96,7 @@ internal static class FieldServerIntegration
             int port=int.TryParse(Environment.GetEnvironmentVariable("MMORPG_TEST_GAME_PORT"),out int proxyPort) ? proxyPort : selected.GameServerPort;
             await _game.ConnectAsync("127.0.0.1", port);
             await _game.SendAsync((ushort)GamePacketOpcode.EnterGameRequest, GameProtocol.CreateEnterGameRequest(selected.AuthKey));
-            await PumpAsync(() => World != null && Monsters != null);
+            await PumpAsync(() => World != null && Monsters != null && Drops != null);
             // 게임 입장 뒤 인벤토리 조회를 명시적으로 보내고 DB 상태가 준비된 뒤 다음 검사를 진행한다.
             await OperationAsync(InventoryOperation.Refresh);
         }
@@ -120,22 +122,39 @@ internal static class FieldServerIntegration
         {
                 switch ((GamePacketOpcode)packet.Op)
                 {
+                    case GamePacketOpcode.MovementActionsBroadcast3D:
+                        var movement=Movement3DProtocol.ReadBroadcast(packet.Data);
+                        if(World!=null && movement.MapId==World.MapId && movement.Generation==World.Generation)
+                            foreach(var action in movement.Actions) MovementReceived?.Invoke(action);
+                        break;
+                    case GamePacketOpcode.MovementState3D:
+                        var snapshot=Movement3DProtocol.ReadState(packet.Data);
+                        if(World!=null && snapshot.MapId==World.MapId && snapshot.Generation==World.Generation) SnapshotReceived?.Invoke(snapshot);
+                        break;
                     case GamePacketOpcode.ChannelState: Channels=FieldExtensions.ReadChannels(packet.Data); break;
                     case GamePacketOpcode.TradeState3D: Trade=TradeProtocol.Read(packet.Data); break;
                     case GamePacketOpcode.TimingPong3D: Pong=new PacketReader(packet.Data,8).ReadUInt64(); break;
-                    case GamePacketOpcode.FieldDrops3D: Drops=FieldExtensions.ReadDrops(packet.Data); break;
-                    case GamePacketOpcode.BasicAttackEvent3D: Attack=CombatProtocol.Read(packet.Data); break;
+                    case GamePacketOpcode.FieldDrops3D:
+                        var drops=FieldExtensions.ReadDrops(packet.Data);
+                        if(World!=null && drops.MapId==World.MapId && drops.Generation==World.Generation) Drops=drops;
+                        break;
+                    case GamePacketOpcode.BasicAttackEvent3D:
+                        var attack=CombatProtocol.Read(packet.Data);
+                        if(World!=null && attack.MapId==World.MapId && attack.Generation==World.Generation) Attack=attack;
+                        break;
                     case GamePacketOpcode.PickupResponse3D: PickupResult=FieldExtensions.ReadPickup(packet.Data).Result; break;
                     case GamePacketOpcode.PlayerEnterMap: Remotes.Add(GameProtocol.ReadPlayerEnterMap(packet.Data).CharacterId); break;
                     case GamePacketOpcode.PlayerLeaveMap: Remotes.Remove(GameProtocol.ReadPlayerLeaveMap(packet.Data)); break;
                     case GamePacketOpcode.PlayerChat: ++ChatCount; break;
                     case GamePacketOpcode.Vitals3D:
                         var vitals=FieldExtensions.ReadVitals(packet.Data);
+                        if(World==null || vitals.MapId!=World.MapId || vitals.Generation!=World.Generation) break;
                         if (vitals.CharacterId == _character) { CombatPaused = vitals.Paused; SawCombatPause |= vitals.Paused; }
                         if (Inventory!=null && vitals.CharacterId==_character && vitals.Revision>=Inventory.Revision)
                         { Inventory.Hp=vitals.Hp; Inventory.Mp=vitals.Mp; Inventory.Revision=vitals.Revision; } break;
                     case GamePacketOpcode.EnterGameResponse: Program.Check(GameProtocol.ReadEnterGameResponse(packet.Data).Result == EnterGameResult.Success, "Game entry failed"); break;
-                    case GamePacketOpcode.World3D: World = Movement3DProtocol.ReadWorld(packet.Data); Monsters = null; _monsterAssembler.Clear(); break;
+                    case GamePacketOpcode.World3D:
+                        World=Movement3DProtocol.ReadWorld(packet.Data); Monsters=null; Drops=null; Attack=null; Remotes.Clear(); _monsterAssembler.Clear(); break;
                     case GamePacketOpcode.WorldBox3D: Movement3DProtocol.AddBox(World, packet.Data); break;
                     case GamePacketOpcode.WorldEnd3D: Movement3DProtocol.CompleteWorld(World, packet.Data); break;
                     case GamePacketOpcode.FieldMonsters3D:
@@ -165,9 +184,9 @@ internal static class FieldServerIntegration
         internal async Task ChangeMapAsync(uint map)
         {
             await _game.SendAsync((ushort)GamePacketOpcode.ChangeMapRequest, GameProtocol.CreateChangeMapRequest(map));
-            await PumpAsync(() => World?.MapId == map && Monsters?.MapId == map);
+            await PumpAsync(() => World?.MapId == map && Monsters?.MapId == map && Drops?.MapId==map);
         }
-        internal async Task MoveSafeAsync()
+        internal async Task<ClientMotion3D> MoveSafeAsync()
         {
             var motion=new ClientMotion3D(); motion.Configure(World); var watch=System.Diagnostics.Stopwatch.StartNew();
             for (int step=0;step<23;++step)
@@ -178,6 +197,7 @@ internal static class FieldServerIntegration
             }
             motion.StopInput(); motion.Advance(0.02); await Task.Delay(220);
             if (motion.TryCreateBatch(watch.Elapsed.TotalSeconds,out var stopped)) await SendAsync(GamePacketOpcode.MovementActions3D,Movement3DProtocol.CreateBatch(stopped));
+            return motion;
         }
         public void Dispose() { _game.Dispose(); _login.Dispose(); }
     }
