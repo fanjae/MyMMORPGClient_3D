@@ -11,6 +11,12 @@
 - 실행 파일과 `_Data`, `UnityPlayer.dll`, `MonoBleedingEdge` 등 빌드 디렉터리를 함께 사용한다.
 - `Offline preview`는 DB 없이 씬 지형과 샘플 인벤토리·몬스터를 확인한다. 온라인에서는 서버 지형과 서버의 몬스터 상태를 사용한다.
 
+## 계정 가입
+
+로그인 화면에서 ID·비밀번호를 입력하고 `CREATE ACCOUNT`를 누르면 레벨 1 기본 캐릭터 `Player<캐릭터 ID>` 한 개를 함께 생성한다. 가입 성공 후 자동 로그인하며, 목록에서 캐릭터를 선택해 입장한다. ID는 영문·숫자·밑줄 3~31자이고 소문자로 저장한다. 비밀번호는 Unicode 문자 8개 이상·UTF-8 63바이트 이하이며 대소문자·공백을 구분한다. 중복 ID는 거절하고, 응답이 유실되면 `LOGIN`으로 먼저 확인한다.
+
+기존 DB에는 `database/init/006_registration.sql`을 적용해야 한다. [가입 처리와 검증 기록](../MyMMORPGServer/docs/ACCOUNT_REGISTRATION_2026-10-16.md)을 참고한다.
+
 ## 조작
 
 | 입력 | 동작 |

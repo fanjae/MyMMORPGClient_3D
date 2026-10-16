@@ -5,7 +5,9 @@ public enum LoginPacketOpcode : ushort
     CharacterListRequest = 3,
     CharacterListResponse = 4,
     CharacterSelectRequest = 5,
-    CharacterSelectResponse = 6
+    CharacterSelectResponse = 6,
+    RegistrationRequest = 7,
+    RegistrationResponse = 8
 }
 
 public enum GamePacketOpcode : ushort

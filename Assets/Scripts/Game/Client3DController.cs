@@ -66,7 +66,7 @@ public sealed class Client3DController : MonoBehaviour
     private bool _usingSceneTerrain;
     private Player3DView _local;
     private uint _localId;
-    private bool _offline, _busy, _sending, _changingMap, _failed, _sendingChat;
+    private bool _offline, _busy, _sending, _changingMap, _failed, _sendingChat, _registering;
     private int _attempt;
     private double _deadline;
     private string _host = "127.0.0.1", _port = "7776", _login = "test", _password = "", _chat = "", _map = "100000003";
@@ -75,6 +75,7 @@ public sealed class Client3DController : MonoBehaviour
     private string _connectedHost;
     private bool _smoke, _smokeOnline, _smokeFinishing, _remoteJump, _remoteLand, _smokePeerReady;
     private bool _smokeFull, _smokeLogin, _smokeCharacters, _smokeTicket, _smokeEntered;
+    private bool _smokeRegistration, _smokeRegistered;
     private uint _smokeCharacterId;
     private ushort _testGamePort;
     private double _smokeStarted;
@@ -107,7 +108,8 @@ public sealed class Client3DController : MonoBehaviour
         if(_ui!=null) { _trade=gameObject.AddComponent<TradeWindow3D>(); _trade.Initialize(_ui.GetComponentInParent<Canvas>().transform,_network,_inventory); }
         if (_ui!=null)
         {
-            _ui.LoginRequested+=(host,port,account,password)=> { _host=host; _port=port; _login=account; _password=password; _ui.ClearFocus(); Login(); };
+            _ui.LoginRequested+=(host,port,account,password)=> { if(_busy) return; _host=host; _port=port; _login=account; _password=password; _ui.ClearFocus(); Login(); };
+            _ui.RegistrationRequested+=(host,port,account,password)=> { if(_busy) return; _host=host; _port=port; _login=account; _password=password; _ui.ClearFocus(); RegisterAccount(); };
             _ui.CharacterRequested+=SelectCharacter; _ui.PreviewRequested+=StartPreview;
             _ui.InventoryRequested+=()=> { _ui.ClearFocus(); _inventory?.SetVisible(!_inventory.IsOpen); };
             _ui.MapRequested+=map=> { _map=map.ToString(); ChangeMap(); };
@@ -134,6 +136,7 @@ public sealed class Client3DController : MonoBehaviour
         _sceneWorld = FindFirstObjectByType<SceneWorld3D>();
         if (_sceneWorld != null) _sceneWorld.SetVisible(false);
         _network.LoginCompleted += LoginCompleted;
+        _network.RegistrationCompleted += RegistrationCompleted;
         _network.CharacterListReceived += CharactersReceived;
         _network.CharacterSelected += CharacterSelected;
         _network.EnterGameReceived += Entered;
@@ -148,7 +151,14 @@ public sealed class Client3DController : MonoBehaviour
             if (data.Result == ChangeMapResult.Success) { ClearWorld(); _chatLines.Clear(); }
         };
         _network.GameDisconnected += Disconnected;
-        _network.LoginDisconnected += () => { if (_localId == 0) { _busy = false; _status = "Login connection closed."; } };
+        _network.LoginDisconnected += () =>
+        {
+            if (_localId == 0)
+            {
+                _status=_registering ? "Registration connection closed. Try LOGIN first; the account may already be saved." : "Login connection closed.";
+                _registering=_busy=false; _password=""; _ui?.ClearPassword();
+            }
+        };
         _network.PlayerChatReceived += data => AddChat($"{data.CharacterId}: {data.Message}");
         _network.WhisperReceived += data => AddChat($"Whisper {data.SenderName} → {data.TargetName}: {data.Message}");
         _network.ChatRejected += data => { _status = $"Chat: {data.Result}"; AddChat(_status); };
@@ -169,7 +179,8 @@ public sealed class Client3DController : MonoBehaviour
             if (!int.TryParse(argument.Substring("--field-load=".Length),out _loadCount) || (_loadCount!=3 && _loadCount!=32 && _loadCount!=128)) { Application.Quit(1); return; }
         }
         if (_loadCount>0) { StartPreview(); gameObject.AddComponent<FieldLoadProbe>().Initialize(_loadCount,_loadDetail); return; }
-        _smokeFull = Array.Exists(arguments, arg => arg == "--smoke-full");
+        _smokeRegistration=Array.Exists(arguments,arg=>arg=="--smoke-register");
+        _smokeFull = _smokeRegistration || Array.Exists(arguments, arg => arg == "--smoke-full");
         _smoke = _smokeFull || Array.Exists(arguments, arg => arg == "--smoke-test" || arg == "--smoke-network");
         _smokeOnline = _smokeFull || Array.Exists(arguments, arg => arg == "--smoke-network");
         if (_smokeFull || Array.Exists(arguments, arg => arg == "--manual-full"))
@@ -181,9 +192,9 @@ public sealed class Client3DController : MonoBehaviour
             _login = Environment.GetEnvironmentVariable("MMORPG_TEST_LOGIN");
             _password = Environment.GetEnvironmentVariable("MMORPG_TEST_PASSWORD");
             if (string.IsNullOrEmpty(_login) || string.IsNullOrEmpty(_password) ||
-                !uint.TryParse(Environment.GetEnvironmentVariable("MMORPG_TEST_CHARACTER"), out _smokeCharacterId))
+                (!_smokeRegistration && !uint.TryParse(Environment.GetEnvironmentVariable("MMORPG_TEST_CHARACTER"), out _smokeCharacterId)))
             { Debug.LogError("3D_FULL_TEST: Missing test account environment."); Application.Quit(1); return; }
-            Login();
+            if(_smokeRegistration) RegisterAccount(); else Login();
             return;
         }
         if (_smoke && !_smokeOnline) StartPreview();
@@ -211,7 +222,7 @@ public sealed class Client3DController : MonoBehaviour
         if (_ui!=null && Time.unscaledTimeAsDouble>=_nextUiAt)
         { _nextUiAt=Time.unscaledTimeAsDouble+0.2; _ui.SetState(_status,_localId,_world?.MapId ?? 0,_channels?.Current ?? 1,_offline,_busy,_inventory?.Data,_characters); }
         if (_busy && Time.unscaledTimeAsDouble >= _deadline)
-        { ++_attempt; _network.DisconnectAll(); _busy = false; _changingMap = false; _characters = Array.Empty<CharacterInfo>(); _status = "Server response timed out."; }
+        { bool registration=_registering; ++_attempt; _network.DisconnectAll(); _registering=_busy=false; _password=""; _changingMap = false; _characters = Array.Empty<CharacterInfo>(); _status = registration ? "Registration result timed out. Try LOGIN first; the account may already be saved." : "Server response timed out."; }
         if (!_motion.Ready || _local == null || _failed) return;
         if(_onlineLoadCount>0 && !_onlineLoadStarted && _monsters.Count>0 && _inventory?.Data!=null)
         { _onlineLoadStarted=true; gameObject.AddComponent<FieldLoadProbe>().Initialize(_onlineLoadCount,_loadDetail,_network); }
@@ -526,12 +537,39 @@ public sealed class Client3DController : MonoBehaviour
     }
     private async void Login()
     {
+        if(_busy) return;
         if (!int.TryParse(_port, out int port) || port < 1 || port > 65535) { _status = "Invalid login port."; return; }
+        string password=_password; _password=""; _ui?.ClearPassword(); _registering=false;
         ++_attempt; int attempt = _attempt; _network.DisconnectAll(); ClearWorld(); _localId = 0; _offline = false;
         _characters = Array.Empty<CharacterInfo>(); _busy = true; _deadline = Time.unscaledTimeAsDouble + 10; _connectedHost = _host.Trim();
+        _status="Signing in...";
         if (_inventory != null) _inventory.Clear();
-        try { await _network.ConnectLoginServerAsync(_connectedHost, port); if (attempt == _attempt) await _network.SendLoginAsync(_login, _password); }
+        try { await _network.ConnectLoginServerAsync(_connectedHost, port); if (attempt == _attempt) await _network.SendLoginAsync(_login, password); }
         catch (Exception e) { if (attempt == _attempt) { _busy = false; _status = ConnectionError.Describe(e, _connectedHost, port, "LoginServer"); } }
+    }
+    private async void RegisterAccount()
+    {
+        if(_busy) return;
+        string error=LoginProtocol.RegistrationError(_login,_password);
+        if(error!=null) { _password=""; _status=error; return; }
+        if(!int.TryParse(_port,out int port) || port<1 || port>65535) { _password=""; _status="Invalid login port."; return; }
+        string password=_password; _password="";
+        ++_attempt; int attempt=_attempt; _network.DisconnectAll(); ClearWorld(); _localId=0; _offline=false;
+        _characters=Array.Empty<CharacterInfo>(); _registering=_busy=true; _password=password;
+        _deadline=Time.unscaledTimeAsDouble+10; _connectedHost=_host.Trim(); _status="Creating account and first character...";
+        if(_inventory!=null) _inventory.Clear();
+        try { await _network.ConnectLoginServerAsync(_connectedHost,port); if(attempt==_attempt) await _network.RegisterAccountAsync(_login,password); }
+        catch(Exception exception)
+        {
+            if(attempt==_attempt) { _registering=_busy=false; _password=""; _ui?.ClearPassword(); _status=ConnectionError.Describe(exception,_connectedHost,port,"LoginServer")+" Try LOGIN first if the request was sent."; }
+        }
+    }
+    private void RegistrationCompleted(RegistrationResult result)
+    {
+        if(!_registering) return;
+        _registering=_busy=false; _status=LoginProtocol.RegistrationMessage(result);
+        if(result==RegistrationResult.Success) { _smokeRegistered=_smokeRegistration; _login=_login.ToLowerInvariant(); Login(); }
+        else { _password=""; _ui?.ClearPassword(); }
     }
     private async void LoginCompleted(LoginResult result)
     {
@@ -545,6 +583,12 @@ public sealed class Client3DController : MonoBehaviour
     {
         _busy = false; _characters = data.Result == CharacterListResult.Success ? data.Characters : Array.Empty<CharacterInfo>();
         _status = $"Characters: {data.Result}";
+        if(_smokeRegistration)
+        {
+            if(_characters.Length!=1 || _characters[0].Level!=1 || _characters[0].Name!="Player"+_characters[0].CharacterId)
+            { Debug.LogError("3D_REGISTRATION_TEST: Invalid starter character."); Application.Quit(1); return; }
+            _smokeCharacterId=_characters[0].CharacterId;
+        }
         if (!_smokeFull && !Array.Exists(Environment.GetCommandLineArgs(), arg => arg == "--manual-full")) return;
         _smokeCharacters = Array.Exists(_characters, character => character.CharacterId == _smokeCharacterId);
         if (!_smokeCharacters) { Debug.LogError("3D_FULL_TEST: Test character missing."); Application.Quit(1); return; }
@@ -552,6 +596,7 @@ public sealed class Client3DController : MonoBehaviour
     }
     private async void SelectCharacter(uint id)
     {
+        if(_busy) return;
         _busy = true; _deadline = Time.unscaledTimeAsDouble + 10;
         try { await _network.SelectCharacterAsync(id); }
         catch (Exception e) { _busy = false; _status = e.Message; }
@@ -759,11 +804,12 @@ public sealed class Client3DController : MonoBehaviour
         bool sceneSourceOk = _usingSceneTerrain ? _sceneWorld != null && _sceneWorld.TerrainRoot.gameObject.activeSelf && _terrain.Count == 0 :
             _terrain.Count == _world.Boxes.Count && (_sceneWorld == null || !_sceneWorld.TerrainRoot.gameObject.activeSelf);
         bool ok = _motion.State.Grounded && _motion.JumpId == 1 && (_smokeFull ? _motion.State.X > 0 : _motion.State.X < 0) && _motion.State.Z > 0 && _world.Boxes.Count == 5 && sceneSourceOk &&
-            (!_smokeOnline || (_remoteJump && _remoteLand)) && rendered &&
+            (!_smokeOnline || (_remoteJump && _remoteLand)) && rendered && (!_smokeRegistration || _smokeRegistered) &&
             (!_smokeFull || (_smokeLogin && _smokeCharacters && _smokeTicket && _smokeEntered && _inventory?.Data != null && _inventory.Data.Result == InventoryResult.Success && _monsters.Count == 3 && _monsterUpdates >= 2 && _monsterMoved));
         File.WriteAllText("Logs/3d-smoke-" + label + ".result", (ok ? "PASS" : "FAILED") +
             $"\ngrounded={_motion.State.Grounded} jumpId={_motion.JumpId} x={_motion.State.X} z={_motion.State.Z} remoteJump={_remoteJump} remoteLand={_remoteLand}" +
             $"\nlogin={_smokeLogin} characters={_smokeCharacters} ticket={_smokeTicket} entered={_smokeEntered} protocol={GameProtocol.ProtocolVersion}" +
+            $"\nregistration={_smokeRegistered}" +
             $"\nterrainSource={(_usingSceneTerrain ? "scene" : "server-or-fallback")} terrainSourceOk={sceneSourceOk}" +
             $"\ninventory={(_inventory?.Data != null)} inventoryRevision={_inventory?.Data?.Revision} monsters={_monsters.Count} monsterUpdates={_monsterUpdates} monsterMoved={_monsterMoved}");
         Debug.Log("3D_PLAYER_SMOKE: " + (ok ? "PASS " : "FAILED ") + label);

@@ -31,6 +31,7 @@ public sealed class NetworkManager3D : MonoBehaviour
     public TcpSession.TrafficSnapshot MovementReceiveTraffic => _gameSession?.GetTraffic((ushort)GamePacketOpcode.MovementActionsBroadcast3D) ?? default;
 
     public event Action<LoginResult> LoginCompleted;
+    public event Action<RegistrationResult> RegistrationCompleted;
     public event Action<CharacterListData> CharacterListReceived;
     public event Action<CharacterSelectData> CharacterSelected;
 
@@ -107,6 +108,9 @@ public sealed class NetworkManager3D : MonoBehaviour
     {
         return _loginSession.SendAsync((ushort)LoginPacketOpcode.CharacterListRequest, Array.Empty<byte>());
     }
+
+    public Task RegisterAccountAsync(string id,string password)=>
+        _loginSession.SendAsync((ushort)LoginPacketOpcode.RegistrationRequest,LoginProtocol.CreateRegistrationRequest(id,password));
 
     public Task SelectCharacterAsync(uint characterId)
     {
@@ -189,6 +193,9 @@ public sealed class NetworkManager3D : MonoBehaviour
 
             switch ((LoginPacketOpcode)opcode)
             {
+                case LoginPacketOpcode.RegistrationResponse:
+                    RegistrationCompleted?.Invoke(LoginProtocol.ReadRegistrationResponse(payload));
+                    break;
                 case LoginPacketOpcode.LoginResponse:
                     LoginCompleted?.Invoke(LoginProtocol.ReadLoginResponse(payload));
                     break;

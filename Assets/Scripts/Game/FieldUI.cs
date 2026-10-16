@@ -7,6 +7,7 @@ using UnityEngine.EventSystems;
 public sealed class FieldUI : MonoBehaviour
 {
     public event Action<string,string,string,string> LoginRequested;
+    public event Action<string,string,string,string> RegistrationRequested;
     public event Action<uint> CharacterRequested, MapRequested;
     public event Action<ushort> ChannelRequested;
     public event Action<string> ChatRequested;
@@ -14,7 +15,8 @@ public sealed class FieldUI : MonoBehaviour
     private GameObject _login, _controls, _chat, _menu;
     private InputField _host, _port, _account, _password, _chatInput;
     private Text _status, _field, _channelStatus, _chatHistory, _life;
-    private Button _loginButton, _revive;
+    private Button _loginButton, _registerButton, _previewButton, _revive;
+    private bool _busy;
     private readonly Button[] _channels = new Button[3];
     private readonly Button[] _characters = new Button[6];
     private uint[] _characterIds = new uint[6];
@@ -29,9 +31,11 @@ public sealed class FieldUI : MonoBehaviour
         _status=transform.Find("Status").GetComponent<Text>(); _field=transform.Find("Controls/Field").GetComponent<Text>();
         _host=_login.transform.Find("Host").GetComponent<InputField>(); _port=_login.transform.Find("Port").GetComponent<InputField>();
         _account=_login.transform.Find("Account").GetComponent<InputField>(); _password=_login.transform.Find("Password").GetComponent<InputField>();
+        EnsureRegistrationControls(_login.transform);
         _chatInput=_chat.transform.Find("Input").GetComponent<InputField>(); _chatHistory=_chat.transform.Find("History").GetComponent<Text>();
-        _loginButton=Bind(_login.transform,"Connect",()=>LoginRequested?.Invoke(_host.text,_port.text,_account.text,_password.text));
-        Bind(_login.transform,"Preview",()=>PreviewRequested?.Invoke());
+        _loginButton=Bind(_login.transform,"Connect",()=> { if(!_busy) LoginRequested?.Invoke(_host.text,_port.text,_account.text,_password.text); });
+        _registerButton=Bind(_login.transform,"Register",()=> { if(!_busy) RegistrationRequested?.Invoke(_host.text,_port.text,_account.text,_password.text); });
+        _previewButton=Bind(_login.transform,"Preview",()=> { if(!_busy) PreviewRequested?.Invoke(); });
         for (int i=0;i<6;++i) { int index=i; _characters[i]=Bind(_login.transform,"Character "+i,()=>CharacterRequested?.Invoke(_characterIds[index])); _characters[i].gameObject.SetActive(false); }
         Bind(_controls.transform,"Inventory",()=>InventoryRequested?.Invoke()); Bind(_controls.transform,"Menu",ToggleMenu);
         Bind(_controls.transform,"Map A",()=>MapRequested?.Invoke(100000002)); Bind(_controls.transform,"Map B",()=>MapRequested?.Invoke(100000003));
@@ -48,6 +52,7 @@ public sealed class FieldUI : MonoBehaviour
     private static Button Bind(Transform parent,string name,Action action)
     { var button=parent.Find(name).GetComponent<Button>(); button.onClick.AddListener(()=> { if(Client3DController.UiInputAllowed) action(); }); return button; }
     public void ClearFocus() { if (EventSystem.current!=null) EventSystem.current.SetSelectedGameObject(null); }
+    public void ClearPassword() { if(_password!=null) _password.text=""; }
     public void ToggleMenu()
     {
         ClearFocus(); _menu.SetActive(!MenuOpen);
@@ -56,8 +61,10 @@ public sealed class FieldUI : MonoBehaviour
     public void CloseMenu() { _menu.SetActive(false); ClearFocus(); }
     public void SetState(string status,uint localId,uint mapId,ushort channel,bool offline,bool busy,InventoryData inventory,CharacterInfo[] characters)
     {
-        SetText(_status,status); bool inField=localId!=0;
-        _login.SetActive(!inField); _controls.SetActive(inField); _chat.SetActive(inField && !offline); _loginButton.interactable=!busy;
+        SetText(_status,status); bool inField=localId!=0; _busy=busy;
+        _login.SetActive(!inField); _controls.SetActive(inField); _chat.SetActive(inField && !offline); _loginButton.interactable=_registerButton.interactable=!busy;
+        _previewButton.interactable=!busy;
+        foreach(var character in _characters) character.interactable=!busy;
         SetText(_field,$"{(offline ? "Preview" : "Channel "+channel)}  |  Field {mapId}\nWASD: move  Space: jump  J/Ctrl: attack  Z: loot");
         bool dead=inventory!=null && inventory.Hp==0; _revive.interactable=inField && dead && !busy && !offline;
         SetText(_life,dead ? "You are defeated. Revive after 3 seconds." : "ESC: close menu   |   Channel switch: grounded only");
@@ -80,7 +87,8 @@ public sealed class FieldUI : MonoBehaviour
     private static void SetText(Text text,string value) { if (text.text!=value) text.text=value; }
     public static void EnsureLayout(GameObject canvas)
     {
-        if (canvas.transform.Find("Field UI")!=null) return;
+        var existing=canvas.transform.Find("Field UI");
+        if (existing!=null) { EnsureRegistrationControls(existing.Find("Login")); return; }
         var root=new GameObject("Field UI",typeof(RectTransform)); root.transform.SetParent(canvas.transform,false);
         var rect=root.GetComponent<RectTransform>(); rect.anchorMin=Vector2.zero; rect.anchorMax=Vector2.one; rect.offsetMin=rect.offsetMax=Vector2.zero;
         Color paper=new(0.08f,0.13f,0.2f,0.94f), blue=new(0.19f,0.36f,0.55f), gold=new(0.93f,0.51f,0.18f);
@@ -92,6 +100,7 @@ public sealed class FieldUI : MonoBehaviour
         Label(login,"Account label",new(18,119,320,20),"Account",13); Input(login,"Account",new(18,145,328,32),"test");
         Label(login,"Password label",new(18,186,320,20),"Password",13); Input(login,"Password",new(18,212,328,32),"",true);
         ButtonAt(login,"Connect",new(18,258,328,34),"CONNECT AND LOGIN",gold);
+        EnsureRegistrationControls(login);
         ButtonAt(login,"Preview",new(18,300,328,30),"OFFLINE PREVIEW",blue);
         for (int i=0;i<6;++i) ButtonAt(login,"Character "+i,new(18,340+i*36,328,31),"Character",blue);
         var controls=Node(root.transform,"Controls",new(738,14,344,166),paper);
@@ -115,6 +124,18 @@ public sealed class FieldUI : MonoBehaviour
         ButtonAt(menu,"Close",new(20,351,410,34),"CLOSE [ESC]",gold);
         root.AddComponent<FieldUI>();
     }
+    public static void EnsureRegistrationControls(Transform login)
+    {
+        if(login==null) return;
+        var connect=login.Find("Connect");
+        if(connect!=null)
+        {
+            connect.GetComponent<RectTransform>().sizeDelta=new(158,34);
+            SetText(connect.GetComponentInChildren<Text>(),"LOGIN");
+        }
+        if(login.Find("Register")==null) ButtonAt(login,"Register",new(188,258,158,34),"CREATE ACCOUNT",new(0.19f,0.36f,0.55f));
+    }
+
     private static RectTransform Node(Transform parent,string name,Rect bounds,Color color)
     {
         var obj=new GameObject(name,typeof(RectTransform),typeof(Image)); obj.transform.SetParent(parent,false);
