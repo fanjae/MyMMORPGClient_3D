@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Threading.Tasks;
 using UnityEngine;
 using UnityEngine.UI;
 
@@ -14,11 +15,13 @@ public sealed class TradeWindow3D : MonoBehaviour
     private TradeStateData _state; private uint _local; private bool _waiting; private double _deadline;
     private string _recoveryKey; private bool _restore;
     private double _nextNetworkAt;
+    private Func<byte[],Task> _sendTrade;
     public bool IsOpen => _panel!=null && _panel.activeSelf;
     public bool Active => _state!=null && _state.Stage<TradeStage.Completed;
-    public void Initialize(Transform canvas,NetworkManager3D network,InventoryWindow inventory)
+    public void Initialize(Transform canvas,NetworkManager3D network,InventoryWindow inventory,Func<byte[],Task> sendTrade=null)
     {
         _network=network; _inventory=inventory;
+        _sendTrade=sendTrade??(request=>network.SendTradeAsync(request));
         _launcher=Button(canvas,"TRADE",738,187,155,30,()=>SetVisible(!IsOpen)).gameObject;
         _networkText=Label(canvas,738,222,350,24,"");
         _panel=Node(canvas,"Trade Panel",18,250,552,455,new Color(0.08f,0.13f,0.2f,0.97f));
@@ -43,7 +46,14 @@ public sealed class TradeWindow3D : MonoBehaviour
     public void SetLocal(uint id,string recoveryKey=null)
     {
         _local=id; _launcher?.SetActive(id!=0); _networkText?.gameObject.SetActive(id!=0);
-        if(id==0) { _inventory?.SetTradeLocked(false); _state=null; _waiting=false; _restore=false; SetVisible(false); ClearPeers(); return; }
+        if(id==0)
+        {
+            _inventory?.SetTradeLocked(false); _state=null; _waiting=false; _restore=false; _draft.Clear();
+            if(_mine!=null) _mine.text=""; if(_theirs!=null) _theirs.text="";
+            if(_quantity!=null) _quantity.text="1"; if(_mesos!=null) _mesos.text="0";
+            if(_offered!=null) { _offered.ClearOptions(); _offered.AddOptions(new List<string>{"No offered items"}); }
+            SetVisible(false); ClearPeers(); return;
+        }
         _recoveryKey=recoveryKey;
         if(!string.IsNullOrEmpty(_recoveryKey) && ulong.TryParse(PlayerPrefs.GetString(_recoveryKey,""),out ulong pending) && pending!=0)
         { _state=new() { Id=pending,Stage=TradeStage.Committing,Characters=new[]{id,0u} }; _inventory?.SetTradeLocked(true); _restore=true; }
@@ -89,16 +99,15 @@ public sealed class TradeWindow3D : MonoBehaviour
         _status.text="Waiting for the server...";
         try
         {
-            await _network.SendTradeAsync(TradeProtocol.Request(operation,_state?.Id??0,_state?.Revision??0,target,_inventory?.Data?.Revision??0,mesos??(side>=0?_state.Offers[side].Mesos:0),slots??_draft));
+            await _sendTrade(TradeProtocol.Request(operation,_state?.Id??0,_state?.Revision??0,target,_inventory?.Data?.Revision??0,mesos??(side>=0?_state.Offers[side].Mesos:0),slots??_draft));
         }
-        catch(Exception) { _waiting=false; _status.text="Trade response unavailable. Query before trying again."; }
+        catch(Exception) { if(this==null || _status==null) return; _waiting=false; _status.text="Trade response unavailable. Query before trying again."; }
     }
     private void Apply(TradeStateData state)
     {
-        if(state.Side(_local)<0) return;
+        if(!TradeStateGate3D.CanApply(_state,state,_local)) return;
         _waiting=false;
-        if(state.Id==0) { _status.text="Trade: "+state.Result; SetVisible(true); return; }
-        if(_state?.Id==state.Id && state.Revision<_state.Revision && state.Stage<TradeStage.Completed) return;
+        if(state.Id==0) { _status.text=ResultMessage(state.Result); SetVisible(true); return; }
         _state=state; int side=state.Side(_local); _draft.Clear(); foreach(var item in state.Offers[side].Items) _draft.Add(item.Source);
         _inventory?.SetTradeLocked(state.Stage==TradeStage.Editing || state.Stage==TradeStage.Committing);
         if(!string.IsNullOrEmpty(_recoveryKey))
@@ -110,9 +119,26 @@ public sealed class TradeWindow3D : MonoBehaviour
         _mesos.text=state.Offers[side].Mesos.ToString(); _offered.ClearOptions(); var names=new List<string>();
         foreach(var item in state.Offers[side].Items) names.Add(ItemCatalog.Name(item.ItemId)+" x"+item.Source.Quantity);
         if(names.Count==0) names.Add("No offered items"); _offered.AddOptions(names);
-        _status.text=state.Stage==TradeStage.Invited ? Name(state.Characters[0])+" requested a trade. The recipient can accept." : state.Stage+" / "+state.Result+"\nChanging either offer clears both confirmations.";
+        _status.text=state.Result!=TradeResult.Success ? ResultMessage(state.Result) : state.Stage switch
+        {
+            TradeStage.Invited=>Name(state.Characters[0])+" requested a trade. The recipient can accept.",
+            TradeStage.Editing=>"Review both offers. Changing either offer clears both confirmations.",
+            TradeStage.Committing=>"Confirming trade. Use QUERY if the result is delayed.",
+            TradeStage.Completed=>"Trade completed.",
+            _=>"Trade cancelled."
+        };
         SetVisible(true);
     }
+    private static string ResultMessage(TradeResult result)=>result switch
+    {
+        TradeResult.Full=>"Trade cancelled: not enough free inventory slots.",
+        TradeResult.Stale=>"The offer changed. Review both offers before confirming again.",
+        TradeResult.StorageError=>"Trade result pending. QUERY checks without repeating the exchange.",
+        TradeResult.Expired=>"Trade expired. Request a new trade.",
+        TradeResult.Unavailable=>"Trade unavailable: a player left or combat interrupted it.",
+        TradeResult.Busy=>"Trade busy. QUERY checks the current result.",
+        _=>"Trade request rejected. Check the items, quantity and mesos."
+    };
     private string Describe(TradeStateData state,int side)
     {
         string text=Name(state.Characters[side])+(state.Confirmed[side]?" [CONFIRMED]":"")+"\nMesos: "+state.Offers[side].Mesos;
